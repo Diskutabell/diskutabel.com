@@ -116,7 +116,7 @@ Col column(float i, float v){
   /* and every so often a whole region goes to ICE — a big blue field
      wandering across the barrier, not one cold conduit at a time. it has to
      stay saturated: a pale blue this bright just tonemaps to white. */
-  float coldM = smoothstep(0.58, 0.88, n2(vec2(i*0.0155, v*0.042) + vec2(uT*0.013, uT*0.008)));
+  float coldM = smoothstep(0.58, 0.88, n2(vec2(i*0.058, v*0.135) + vec2(uT*0.016, uT*0.010)));
   col = mix(col, vec3(0.05, 0.26, 1.00), coldM*0.92);
 
   /* traffic along the filament — continuous, faintly segmented */
@@ -163,13 +163,13 @@ Col column(float i, float v){
    toward the viewer, so a body leaning on the back of it shows up as a
    dome, an expanding shock ring and a train of standing ripples.       */
 float breachEnv(){
-  const float LIFE = 17.0;
+  const float LIFE = 10.0;
   if (uBT < 0.0 || uBT > LIFE) return 0.0;
-  /* it leans, it holds, it gives up: a swell rather than an impact.
-     the tail is faded out before the cut so nothing ever pops off. */
-  float rise = smoothstep(0.0, 1.00, uBT);
-  float fall = exp(-max(uBT - 1.00, 0.0) * 0.155);
-  return rise * fall * (1.0 - smoothstep(LIFE - 5.0, LIFE, uBT));
+  /* it leans, it holds, it gives up. the tail is faded out before the cut
+     so nothing ever pops off. */
+  float rise = smoothstep(0.0, 0.60, uBT);
+  float fall = exp(-max(uBT - 0.60, 0.0) * 0.300);
+  return rise * fall * (1.0 - smoothstep(LIFE - 3.0, LIFE, uBT));
 }
 float breachH(vec2 p){
   float env = breachEnv();
@@ -180,7 +180,7 @@ float breachH(vec2 p){
   /* domain warp: whatever is behind this has no shape worth naming */
   vec2 w1 = vec2(fbm2(q*0.23 + sd), fbm2(q*0.23 + sd + 47.9)) - 0.5;
   q += w1 * 7.0;
-  vec2 w2 = vec2(fbm2(q*0.55 + uBT*0.165), fbm2(q*0.55 + 91.0 - uBT*0.132)) - 0.5;
+  vec2 w2 = vec2(fbm2(q*0.55 + uBT*0.280), fbm2(q*0.55 + 91.0 - uBT*0.225)) - 0.5;
   q += w2 * 3.0;
 
   float r = length(q);
@@ -197,9 +197,9 @@ float breachH(vec2 p){
   }
 
   float grain = fbm2(q*0.42 + 21.0);
-  float front = uBT*1.70;
+  float front = uBT*2.80;
   float ring   = exp(-pow(r - front, 2.0)*0.26) * 0.85 * (0.35 + 1.20*grain);
-  float ripple = cos(r*2.10 - uBT*3.20 + grain*7.0) * exp(-r*r*0.030) * 0.38;
+  float ripple = cos(r*2.10 - uBT*5.50 + grain*7.0) * exp(-r*r*0.030) * 0.38;
 
   /* frayed edge — it tears through rather than bulging out */
   float mask = smoothstep(0.16, 0.68, grain*0.85 + 0.42);
@@ -589,18 +589,24 @@ let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = true;
 let breachT = -1e4, breachX = 0.0, breachY = 7.0;
 function strike(a){ pulse = Math.min(1.3, pulse + a); }
 
-/* rare, and worth waiting for */
+/* no rhythm, no favoured spot — you should never be able to guess either */
 function triggerBreach(){
   breachT = clockT;
-  breachX = -7.0 + Math.random()*11.0;
-  breachY =  3.2 + Math.random()*7.5;
+  /* anywhere along the span: close on the left, far down the right, or so
+     far out it is barely more than a smudge. nothing about where it comes
+     from should be predictable. */
+  breachX = -9.0 + Math.random()*44.0;
+  breachY =  2.0 + Math.random()*10.0;
   if (audioReady && AC && AC.state === "running") pressure();
   strike(0.45);
 }
+/* poisson arrivals rather than a window: there is no interval to lock onto.
+   two can land close together, then nothing for minutes. */
+function nextGap(){ return 9000 - Math.log(1.0 - Math.random())*52000; }
 function scheduleBreach(){
-  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 42000 + Math.random()*58000);
+  setTimeout(() => { triggerBreach(); scheduleBreach(); }, nextGap());
 }
-setTimeout(() => { triggerBreach(); scheduleBreach(); }, 18000 + Math.random()*20000);
+setTimeout(() => { triggerBreach(); scheduleBreach(); }, 12000 + Math.random()*14000);
 
 /* a soft halo, not a flare: enough spread to make the conduits read as
    emitters, short enough that nothing smears across the frame */
@@ -825,20 +831,20 @@ function pressure(){
   const s = AC.createBufferSource(); s.buffer = noiseBuf(8); s.loop = true;
   const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.2;
   f.frequency.setValueAtTime(340, AC.currentTime);
-  f.frequency.exponentialRampToValueAtTime(85, AC.currentTime + 10.0);
+  f.frequency.exponentialRampToValueAtTime(85, AC.currentTime + 6.0);
   const g = AC.createGain(); g.gain.value = 0.0001;
-  g.gain.exponentialRampToValueAtTime(0.42, AC.currentTime + 3.5);
-  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 15.5);
+  g.gain.exponentialRampToValueAtTime(0.42, AC.currentTime + 2.0);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 9.0);
 
   const sub = AC.createOscillator(); sub.type = "sine"; sub.frequency.value = 33.0;
   const sg = AC.createGain(); sg.gain.value = 0.0001;
-  sg.gain.exponentialRampToValueAtTime(0.16, AC.currentTime + 4.0);
-  sg.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 15.5);
+  sg.gain.exponentialRampToValueAtTime(0.16, AC.currentTime + 2.2);
+  sg.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 9.0);
 
   s.connect(f); f.connect(g); g.connect(bus);
   sub.connect(sg); sg.connect(bus);
-  s.start(); s.stop(AC.currentTime + 15.9);
-  sub.start(); sub.stop(AC.currentTime + 15.9);
+  s.start(); s.stop(AC.currentTime + 9.4);
+  sub.start(); sub.stop(AC.currentTime + 9.4);
   strike(0.30);
 }
 
