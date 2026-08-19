@@ -2,837 +2,568 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>diskutabel.com</title>
-<meta name="theme-color" content="#03010a">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BLACKWALL</title>
+<meta name="description" content="An ambient rendering of the Blackwall.">
+<meta name="theme-color" content="#000000">
 <style>
-*{box-sizing:border-box}
-
-html,body{
-  height:100%;
-  margin:0;
-  background:#03010a;
-  overflow:hidden;
-}
-
-body{
-  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  -webkit-font-smoothing:antialiased;
-}
-
-#wall{
-  display:block;
-  position:fixed;
-  inset:0;
-  width:100%;
-  height:100%;
-}
-
-#gate{
-  position:fixed;
-  inset:0;
-  z-index:10;
-  display:none;
-  align-items:center;
-  justify-content:center;
-  background:rgba(3,1,10,.7);
-  cursor:pointer;
-}
-#gate.open{display:flex}
-
-#gate p{
-  margin:0;
-  font-size:clamp(.62rem,1.7vw,.78rem);
-  font-weight:400;
-  letter-spacing:.44em;
-  text-indent:.44em;
-  text-transform:uppercase;
-  color:#c8203c;
-  text-shadow:0 0 22px rgba(200,32,60,.5);
-}
-#gate:focus-visible{outline:1px solid rgba(200,32,60,.5);outline-offset:-4px}
-
-.nojs{
-  position:fixed;
-  inset:0;
-  display:grid;
-  place-content:center;
-  margin:0;
-  font-size:.72rem;
-  letter-spacing:.4em;
-  text-transform:uppercase;
-  color:#4a0812;
-}
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;width:100%;background:#000;overflow:hidden}
+  canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
+  /* faint anamorphic veil + tube interlace, purely optical */
+  .veil{position:fixed;inset:0;pointer-events:none;mix-blend-mode:screen;
+    background:
+      radial-gradient(130% 75% at 58% 40%, rgba(255,24,40,.055) 0%, rgba(255,24,40,0) 64%),
+      radial-gradient(95% 60% at 18% 82%, rgba(120,30,255,.045) 0%, rgba(120,30,255,0) 72%);
+    animation:breathe 23s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:.7}50%{opacity:1}}
+  .crt{position:fixed;inset:0;pointer-events:none;opacity:.16;
+    background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.6) 3px,rgba(0,0,0,0) 4px)}
+  @media (prefers-reduced-motion:reduce){.veil{animation:none}}
 </style>
 </head>
 <body>
-
-<canvas id="wall" aria-hidden="true"></canvas>
-
-<div id="gate" role="button" tabindex="0" aria-label="Open the audio channel">
-  <p>click to open the channel</p>
-</div>
-
-<noscript><p class="nojs">the wall is dark without scripts</p></noscript>
+<canvas id="gl"></canvas>
+<div class="veil"></div>
+<div class="crt"></div>
 
 <script>
-/* Shared math for the Blackwall.
-   Everything time-based is built from sines whose frequency ratios are
-   mutually irrational, so no layer ever re-phases with another and the
-   wall never returns to a state it has already been in. Nothing loops. */
 (function () {
-  "use strict";
-  const BW = window.BW = window.BW || {};
+"use strict";
 
-  BW.N = function (t, p) {
-    return Math.sin(t * 0.70000 + p)          * 0.50
-         + Math.sin(t * 1.13007 + p * 1.7071) * 0.30
-         + Math.sin(t * 2.39207 + p * 0.3131) * 0.13
-         + Math.sin(t * 4.66921 + p * 2.2360) * 0.07;
-  };
-  /* same, normalised to 0..1 */
-  BW.N01 = function (t, p) { return 0.5 + 0.5 * BW.N(t, p); };
+const cvs = document.getElementById("gl");
+const gl = cvs.getContext("webgl2", { antialias:false, alpha:false, powerPreference:"high-performance", desynchronized:true });
+if (!gl) return;
 
-  BW.rnd   = (a, b) => a + Math.random() * (b - a);
-  BW.clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
-  BW.smooth = (x) => x * x * (3 - 2 * x);
+const CALM = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1.0 : 0.0;
 
-  /* Colour is a function of how hard a strand is burning, like a blackbody
-     ramp: dead strands sit near black, only the hottest reach white. */
-  const WARM = [
-    [0.00, [ 12,   4,  14]],
-    [0.18, [ 62,  16,  34]],
-    [0.38, [138,  30,  58]],
-    [0.58, [202,  50,  84]],
-    [0.78, [244,  88, 124]],
-    [0.92, [255, 140, 184]],
-    [1.00, [255, 186, 214]]
-  ];
-  const COLD = [
-    [0.00, [  3,   3,  10]],
-    [0.22, [ 17,  19,  52]],
-    [0.46, [ 40,  46, 124]],
-    [0.70, [ 78,  98, 206]],
-    [0.88, [140, 172, 246]],
-    [1.00, [214, 232, 255]]
-  ];
+/* ================================================================
+   SHADERS
+   ================================================================ */
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2);
+  gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
+}`;
 
-  function sample(stops, v) {
-    v = BW.clamp(v, 0, 1);
-    for (let i = 1; i < stops.length; i++) {
-      if (v <= stops[i][0]) {
-        const a = stops[i - 1], b = stops[i];
-        const k = (v - a[0]) / (b[0] - a[0] || 1);
-        return [
-          a[1][0] + (b[1][0] - a[1][0]) * k,
-          a[1][1] + (b[1][1] - a[1][1]) * k,
-          a[1][2] + (b[1][2] - a[1][2]) * k
-        ];
-      }
-    }
-    return stops[stops.length - 1][1];
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 O;
+
+uniform vec2  uRes;
+uniform float uT;
+uniform float uPulse;
+uniform float uEnter;
+uniform float uCalm;
+
+#define PI 3.141592653589793
+
+float hash11(float p){ p = fract(p*0.1031); p *= p+33.33; p *= p+p; return fract(p); }
+float hash21(vec2 p){ vec3 q = fract(vec3(p.xyx)*vec3(0.1031,0.1030,0.0973));
+                      q += dot(q, q.yzx+33.33); return fract((q.x+q.y)*q.z); }
+float vnoise(float x){ float i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+                       return mix(hash11(i), hash11(i+1.0), f); }
+
+/* ---------------- one filament of the barrier ---------------- */
+struct Col { vec3 c; float b; float w; };
+
+Col column(float i, float v){
+  float a = hash11(i*1.7  + 3.0);
+  float b = hash11(i*3.1  + 11.0);
+  float c = hash11(i*5.3  + 27.0);
+  float d = hash11(i*7.9  + 53.0);
+
+  /* hairlines mostly, a few heavier conduits */
+  float w = 0.030 + 0.115*a*a*a;
+
+  /* palette: arterial red dominant, magenta veins, rare cold ICE.
+     desaturated slightly toward sensor response rather than pure primaries */
+  float n = vnoise(i*0.045 + uT*0.011)*0.66 + vnoise(i*0.19 - uT*0.007)*0.34;
+  vec3 red = vec3(1.00, 0.070, 0.100);
+  vec3 mag = vec3(1.00, 0.105, 0.40);
+  vec3 vio = vec3(0.62, 0.15, 0.95);
+  vec3 ice = vec3(0.42, 0.70, 1.00);
+  vec3 col = mix(red, mag, smoothstep(0.44, 0.74, n));
+  col = mix(col, vio, smoothstep(0.80, 0.92, n));
+  col = mix(col, ice, smoothstep(0.945, 0.995, n));
+
+  /* traffic along the filament — continuous, faintly segmented */
+  float dir = b > 0.5 ? 1.0 : -1.0;
+  float y = v*2.35 + uT*(0.30 + 1.55*c)*dir*(1.0-0.7*uCalm) + d*17.0;
+  float dv = fract(y);
+  float seg = 1.0 - 0.28*(1.0 - smoothstep(0.03,0.26,dv)*smoothstep(1.00,0.74,dv));
+
+  float pk = exp(-pow(fract(y*0.121)-0.5, 2.0)*82.0);
+
+  float fl = 0.94 + 0.06*sin(uT*(1.1+4.4*b) + i*2.3);
+  float drop = mix(1.0, step(0.022, hash11(floor(uT*2.2 + i*0.13) + i*1.9)), 0.55);
+
+  float bri = (0.20 + 2.05*b*b) * seg * fl * drop;
+  bri += pk * 1.10 * b;
+
+  float scan = exp(-pow(fract(v*0.058 - uT*0.026)-0.5, 2.0)*62.0);
+  bri *= 1.0 + scan*0.40;
+
+  /* wide dormant zones — the barrier is not lit evenly across its span */
+  bri *= smoothstep(0.10, 0.58, vnoise(i*0.0205 + uT*0.0055))*0.78 + 0.22;
+
+  bri *= smoothstep(20.0, 1.5, v);
+  bri *= 1.0 + uPulse*0.45;
+
+  Col r; r.c = col; r.b = bri; r.w = w; return r;
+}
+
+/* ---------------- what leans against it ---------------- */
+float sdSeg(vec2 p, vec2 a, vec2 b){
+  vec2 pa = p-a, ba = b-a;
+  float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+  return length(pa - ba*h);
+}
+float presence(vec2 p){
+  float t = uT*0.095;
+  vec2  c = vec2(-0.5 + sin(t*0.47)*6.5, 8.30 + sin(t*0.33)*1.4);
+  float s = 5.40;
+  vec2 q = (p - c)/s;
+  q.x += sin(t*1.05)*0.06*(q.y+0.6);
+
+  float d = length(q - vec2(0.0, 0.615)) - 0.120;
+  d = min(d, sdSeg(q, vec2(0.00, 0.46), vec2(0.02,-0.06)) - 0.140);
+  d = min(d, sdSeg(q, vec2(-0.03,0.40), vec2(-0.30+0.07*sin(t*1.7), 0.06)) - 0.048);
+  d = min(d, sdSeg(q, vec2( 0.05,0.40), vec2( 0.31+0.07*cos(t*1.4), 0.02)) - 0.048);
+  d = min(d, sdSeg(q, vec2(-0.04,-0.03), vec2(-0.11,-0.66)) - 0.052);
+  d = min(d, sdSeg(q, vec2( 0.06,-0.03), vec2( 0.13,-0.66)) - 0.052);
+
+  float amp = smoothstep(0.80, 0.995, sin(uT*0.0335)*0.5+0.5);
+  amp *= 0.88 + 0.12*sin(uT*1.9);
+  return (exp(-max(d,0.0)*9.5)*0.55 + exp(-max(d,0.0)*2.6)*0.18) * amp;
+}
+
+/* ---------------- barrier surface ---------------- */
+vec3 wall(vec2 p, float foot, float ca){
+  const float P = 0.40;
+  float fu = p.x / P;
+  float aa = max(foot / P, 0.0006);
+  float i  = floor(fu);
+  float cab = ca * max(aa, 0.0035) * 1.35;
+
+  vec3 sharp = vec3(0.0);
+  vec3 halo  = vec3(0.0);
+  vec3 avg   = vec3(0.0);
+  float occ  = 0.0;
+
+  for (int j = -4; j <= 4; j++){
+    float ci = i + float(j);
+    Col  c  = column(ci, p.y);
+    float dd = fu - (ci + 0.5);
+    float hw = c.w*0.5;
+
+    vec3 cov;
+    cov.r = clamp((hw - abs(dd - cab))/aa + 0.5, 0.0, 1.0);
+    cov.g = clamp((hw - abs(dd      ))/aa + 0.5, 0.0, 1.0);
+    cov.b = clamp((hw - abs(dd + cab))/aa + 0.5, 0.0, 1.0);
+
+    sharp += c.c * cov * c.b;
+
+    /* incandescent core — this is what makes an emitter read as real:
+       the centre clips to white, the colour lives in the falloff */
+    float inner = clamp((hw*0.42 - abs(dd))/aa + 0.5, 0.0, 1.0);
+    sharp += mix(c.c, vec3(1.0, 0.96, 0.94), 0.78) * inner * c.b * 0.32;
+
+    occ  += cov.g * c.b;
+    halo += c.c * c.b * (exp(-dd*dd*0.85)*0.030 + 0.0080/(1.0 + dd*dd*0.85));
+    avg  += c.c * c.b * c.w;
+  }
+  avg /= 9.0;
+
+  float m = smoothstep(0.10, 1.05, aa);
+  vec3 col = mix(sharp, avg*1.05, m) + halo;
+
+  float pr = presence(p);
+  col += vec3(1.0, 0.10, 0.20) * pr * 0.30 * (1.0 - 0.55*clamp(occ*0.4, 0.0, 1.0));
+
+  col += vec3(0.20, 0.012, 0.038) * 0.045 * smoothstep(17.0, 0.4, p.y);
+
+  /* motes hanging in the field */
+  vec2 sc = floor(p*1.55);
+  float sh = hash21(sc + 5.0);
+  vec2  sf = (fract(p*1.55) - vec2(hash21(sc+13.0), hash21(sc+29.0))) / 1.55;
+  float sd = length(sf) / max(0.022, foot*0.5);
+  col += vec3(0.72, 0.67, 0.78) * step(0.9935, sh) * exp(-sd*sd*1.9)
+         * (0.30 + 0.70*hash21(sc+71.0)) * 0.60 * smoothstep(2.0, 9.0, p.y) * (1.0 - m);
+  return col;
+}
+
+/* ---------------- the plain in front of it ---------------- */
+vec3 ground(vec3 pos, float foot){
+  const float P = 0.40, R = 0.345;
+  vec2 g  = vec2(pos.x/P, pos.z/R);
+  float aa = max(foot/min(P,R), 0.0010);
+  vec2 gi = floor(g);
+  vec2 gf = fract(g) - 0.5;
+
+  float d = length(gf*vec2(1.0, 0.86));
+  float r = 0.155;
+  float m = clamp((r - d)/aa + 0.5, 0.0, 1.0);
+  m = mix(m, PI*r*r/0.86, smoothstep(0.30, 1.00, aa));
+
+  Col c = column(gi.x, -pos.z*0.90 + 3.0);
+  float fade = exp(-max(pos.z,0.0)*0.108);
+
+  vec3 col = c.c * c.b * m * fade * 1.05;
+  col += c.c * 0.075 * exp(-max(pos.z,0.0)*0.60);
+  return col;
+}
+
+/* ---------------- the ones who came to look ---------------- */
+float capsule(vec3 ro, vec3 rd, vec3 pa, vec3 pb, float ra){
+  vec3 ba = pb-pa, oa = ro-pa;
+  float baba = dot(ba,ba), bard = dot(ba,rd), baoa = dot(ba,oa);
+  float rdoa = dot(rd,oa), oaoa = dot(oa,oa);
+  float a = baba - bard*bard;
+  float b = baba*rdoa - baoa*bard;
+  float c = baba*oaoa - baoa*baoa - ra*ra*baba;
+  float h = b*b - a*c;
+  if (h >= 0.0){
+    float t = (-b - sqrt(h))/a;
+    float y = baoa + t*bard;
+    if (y > 0.0 && y < baba) return t;
+    vec3 oc = (y <= 0.0) ? oa : ro-pb;
+    b = dot(rd,oc); c = dot(oc,oc) - ra*ra; h = b*b - c;
+    if (h > 0.0) return -b - sqrt(h);
+  }
+  return -1.0;
+}
+vec3 capNormal(vec3 pos, vec3 a, vec3 b, float r){
+  vec3 ba = b-a, pa = pos-a;
+  float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+  return (pa - h*ba)/r;
+}
+
+/* filmic rolloff — highlights bleach to white instead of clipping to neon */
+vec3 aces(vec3 x){
+  const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+  return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+}
+
+void main(){
+  vec2 frag = gl_FragCoord.xy;
+  vec2 uv = (frag - 0.5*uRes) / uRes.y;
+
+  /* transport tear — rare, small */
+  float bandH = 6.0 + 30.0*hash11(floor(uT*1.6));
+  float band  = floor(frag.y / bandH);
+  float slice = floor(uT*8.0);
+  float hit   = step(0.9935 - 0.05*uPulse, hash21(vec2(band, slice)));
+  uv.x += hit * (hash21(vec2(band*3.7, slice))-0.5) * 0.030 * (1.0-uCalm);
+
+  /* camera: on the plain, oblique to the barrier, handheld */
+  float sl = 1.0 - 0.6*uCalm;
+  float shx = (vnoise(uT*0.55)-0.5)*0.035 + (vnoise(uT*1.7+9.0)-0.5)*0.012;
+  float shy = (vnoise(uT*0.47+31.0)-0.5)*0.028 + (vnoise(uT*1.4+3.0)-0.5)*0.010;
+  vec3 ro = vec3(-9.40 + sin(uT*0.043)*0.85*sl, 3.10 + sin(uT*0.061)*0.16*sl, 12.00 + sin(uT*0.029)*0.75*sl);
+  vec3 ta = vec3( 0.00 + sin(uT*0.037)*0.95*sl + shx*3.0, 5.24 + sin(uT*0.027)*0.45*sl + shy*3.0, 0.00);
+  vec3 ww = normalize(ta - ro);
+  vec3 uu = normalize(cross(ww, vec3(0.0,1.0,0.0)));
+  vec3 vv = cross(uu, ww);
+  float roll = sin(uT*0.021)*0.018*sl;
+  const float FOCAL = 0.92;
+  vec3 rd = normalize(uv.x*(uu*cos(roll) + vv*sin(roll))
+                    + uv.y*(vv*cos(roll) - uu*sin(roll))
+                    + FOCAL*ww);
+
+  float px = 1.0/(uRes.y*FOCAL);
+  float radial = length(uv);
+
+  float tW = 1e9, tF = 1e9;
+  if (rd.z < -1e-4){ float t = -ro.z/rd.z; if (t > 0.0) tW = t; }
+  if (rd.y < -1e-4){ float t = -ro.y/rd.y; if (t > 0.0) tF = t; }
+
+  vec3 col = vec3(0.0);
+  float t = 1e9;
+
+  if (tF < tW){
+    vec3 p = ro + rd*tF;
+    col = ground(p, tF*px/max(abs(rd.y), 0.02));
+    t = tF;
+  } else if (tW < 1e8){
+    vec3 p = ro + rd*tW;
+    /* defocus grows toward the vanishing edge, like a long lens wide open */
+    float foot = tW*px/max(abs(rd.z), 0.02) * (1.0 + 1.30*radial*radial);
+    col = wall(p.xy, foot, 0.45 + 1.15*radial);
+    t = tW;
+  } else {
+    col = vec3(0.0008, 0.0004, 0.0012);
+    t = 400.0;
   }
 
-  /* Precomputed so the render loop never builds a colour string. */
-  BW.LEVELS = 64;
-  function lut(stops) {
-    const out = new Array(BW.LEVELS);
-    for (let i = 0; i < BW.LEVELS; i++) {
-      const c = sample(stops, i / (BW.LEVELS - 1));
-      out[i] = "rgb(" + (c[0] | 0) + "," + (c[1] | 0) + "," + (c[2] | 0) + ")";
+  vec3 figs[2];
+  figs[0] = vec3(-1.10 + sin(uT*0.050)*0.22, 0.0, 1.35);
+  figs[1] = vec3(-6.30 + sin(uT*0.031)*0.14, 0.0, 2.05);
+  float hgt[2];
+  hgt[0] = 1.72; hgt[1] = 1.60;
+
+  for (int k = 0; k < 2; k++){
+    vec3 f = figs[k]; float Hh = hgt[k];
+    float best = 1e9; vec3 n = vec3(0.0); float tt; vec3 pa, pb; float rr;
+
+    pa = f + vec3(-0.075, 0.05, 0.0); pb = f + vec3(-0.050, Hh*0.50, 0.0); rr = 0.060;
+    tt = capsule(ro, rd, pa, pb, rr); if (tt > 0.0 && tt < best){ best = tt; n = capNormal(ro+rd*tt, pa, pb, rr); }
+
+    pa = f + vec3( 0.075, 0.05, 0.0); pb = f + vec3( 0.050, Hh*0.50, 0.0); rr = 0.060;
+    tt = capsule(ro, rd, pa, pb, rr); if (tt > 0.0 && tt < best){ best = tt; n = capNormal(ro+rd*tt, pa, pb, rr); }
+
+    pa = f + vec3(0.0, Hh*0.46, 0.0); pb = f + vec3(0.0, Hh*0.80, 0.0); rr = 0.112;
+    tt = capsule(ro, rd, pa, pb, rr); if (tt > 0.0 && tt < best){ best = tt; n = capNormal(ro+rd*tt, pa, pb, rr); }
+
+    pa = f + vec3(-0.145, Hh*0.79, 0.0); pb = f + vec3(0.145, Hh*0.79, 0.0); rr = 0.072;
+    tt = capsule(ro, rd, pa, pb, rr); if (tt > 0.0 && tt < best){ best = tt; n = capNormal(ro+rd*tt, pa, pb, rr); }
+
+    pa = f + vec3(0.0, Hh*0.905, 0.0); pb = f + vec3(0.0, Hh*0.930, 0.0); rr = 0.082;
+    tt = capsule(ro, rd, pa, pb, rr); if (tt > 0.0 && tt < best){ best = tt; n = capNormal(ro+rd*tt, pa, pb, rr); }
+
+    if (best < t){
+      vec3 L = normalize(vec3(0.15, 0.22, -1.0));
+      float diff = max(dot(n, L), 0.0);
+      float rim  = pow(1.0 - abs(dot(n, -rd)), 2.2);
+      col = vec3(0.004, 0.0015, 0.003)
+          + vec3(1.0, 0.09, 0.16) * (diff*0.10 + rim*0.75);
+      t = best;
     }
-    return out;
-  }
-  BW.LUT_WARM = lut(WARM);
-  BW.LUT_COLD = lut(COLD);
-
-  BW.level = function (v) {
-    const i = (BW.clamp(v, 0, 1) * (BW.LEVELS - 1)) | 0;
-    return i;
-  };
-})();
-
-/* A rogue AI finding a weak spot and leaning on it.
-   It never opens a hole. The wall stays intact and the shape of the thing
-   behind it comes forward through the strands like a pin-art relief:
-   the elements it presses on brighten and swell, everything else holds. */
-(function () {
-  "use strict";
-  const BW = window.BW = window.BW || {};
-  const { rnd, clamp, N, smooth } = BW;
-
-  BW.Breach = class Breach {
-    constructor() {
-      this.active = false;
-      this.next = rnd(14, 32);
-      this.onOpen = null;
-      this.blobs = [];
-      this.env = 0;
-    }
-
-    open(t, W, H) {
-      const cx = rnd(W * 0.18, W * 0.82);
-      const cy = rnd(H * 0.3, H * 0.7);
-      const scale = Math.min(W, H) * rnd(0.16, 0.3);
-
-      /* a handful of overlapping lobes: a silhouette, not a circle */
-      const n = 3 + (Math.random() * 4 | 0);
-      this.blobs = [];
-      for (let i = 0; i < n; i++) {
-        this.blobs.push({
-          ox: rnd(-0.7, 0.7) * scale,
-          oy: rnd(-0.9, 0.9) * scale,
-          r : scale * rnd(0.36, 0.85),
-          ph: Math.random() * 900,
-          sp: rnd(0.05, 0.16),
-          wander: scale * rnd(0.08, 0.26)
-        });
-      }
-
-      this.cx = cx; this.cy = cy; this.scale = scale;
-      this.t0 = t;
-      this.dur = rnd(7, 15);
-      this.depth = rnd(0.4, 0.8);     /* how far it gets before the wall holds */
-      this.active = true;
-      this.env = 0;
-      if (this.onOpen) this.onOpen();
-    }
-
-    /* probe → press → the wall pushes back → gone */
-    envelope(k) {
-      if (k < 0.3)  return smooth(k / 0.3) * 0.4;
-      if (k < 0.62) return 0.4 + smooth((k - 0.3) / 0.32) * 0.6;
-      if (k < 0.72) return 1;
-      return 1 - smooth(clamp((k - 0.72) / 0.28, 0, 1));
-    }
-
-    update(t, W, H) {
-      if (!this.active) {
-        if (t > this.next) this.open(t, W, H);
-        return;
-      }
-      const k = (t - this.t0) / this.dur;
-      if (k >= 1) {
-        this.active = false;
-        this.env = 0;
-        this.next = t + rnd(20, 70);
-        return;
-      }
-      this.env = this.envelope(k) * this.depth;
-
-      /* the lobes keep shifting, so the silhouette is never twice the same */
-      for (const b of this.blobs) {
-        b.x = this.cx + b.ox + N(t * b.sp, b.ph) * b.wander;
-        b.y = this.cy + b.oy + N(t * b.sp * 0.83, b.ph * 1.7) * b.wander;
-      }
-
-      /* bounding box, so the wall only pays for columns it touches */
-      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
-      for (const b of this.blobs) {
-        x0 = Math.min(x0, b.x - b.r * 1.6); x1 = Math.max(x1, b.x + b.r * 1.6);
-        y0 = Math.min(y0, b.y - b.r * 1.6); y1 = Math.max(y1, b.y + b.r * 1.6);
-      }
-      this.x0 = x0; this.x1 = x1; this.y0 = y0; this.y1 = y1;
-    }
-
-    /* how hard the thing is pushing on this point of the wall, 0..1 */
-    field(px, py) {
-      if (!this.active || this.env <= 0) return 0;
-      let f = 0;
-      for (let i = 0; i < this.blobs.length; i++) {
-        const b = this.blobs[i];
-        const dx = px - b.x, dy = py - b.y;
-        const d2 = (dx * dx + dy * dy) / (b.r * b.r);
-        if (d2 < 6) f += Math.exp(-d2);
-      }
-      /* a ragged edge — it is a silhouette, not a bubble */
-      const edge = 0.06 * N(px * 0.021, py * 0.017) + 0.04 * N(py * 0.038, px * 0.029);
-      return clamp(smooth(clamp((f - 0.42 + edge) / 0.46, 0, 1)) * this.env, 0, 1);
-    }
-  };
-})();
-
-/* The wall itself.
-   Straight vertical strands with a dot-matrix grain, fixed in place — the
-   strands do not travel sideways. What moves is light: slow zones of
-   pressure sliding along the wall, individual strands waking and dying,
-   and whatever leans on it from the far side. */
-(function () {
-  "use strict";
-  const BW = window.BW = window.BW || {};
-  const { N, N01, rnd, clamp, LUT_WARM, LUT_COLD, LEVELS, level } = BW;
-
-  BW.Wall = class Wall {
-    constructor(canvas, opts) {
-      this.cv = canvas;
-      this.ctx = canvas.getContext("2d", { alpha: false });
-      this.buf = document.createElement("canvas");
-      this.bx = this.buf.getContext("2d");
-      this.g1 = document.createElement("canvas"); this.g1x = this.g1.getContext("2d");
-      this.g2 = document.createElement("canvas"); this.g2x = this.g2.getContext("2d");
-      this.reduced = !!(opts && opts.reduced);
-      this.breach = null;
-
-      this.zones = [];
-      for (let i = 0; i < 3; i++)
-        this.zones.push({ ph: Math.random() * 900, sp: 0.014 + i * 0.009, w: 0.09 + i * 0.06, amp: 0.34 - i * 0.09 });
-
-      this.glitches = [];
-      this.nextGlitch = rnd(5, 16);
-      this.resize();
-    }
-
-    resize() {
-      const W = this.W = window.innerWidth;
-      const H = this.H = window.innerHeight;
-      const DPR = this.DPR = Math.min(window.devicePixelRatio || 1, W < 620 ? 1.5 : 2);
-
-      this.cv.width  = this.buf.width  = Math.max(2, Math.round(W * DPR));
-      this.cv.height = this.buf.height = Math.max(2, Math.round(H * DPR));
-      this.cv.style.width = W + "px";
-      this.cv.style.height = H + "px";
-      this.ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      this.bx.setTransform(DPR, 0, 0, DPR, 0, 0);
-
-      this.gw1 = Math.max(2, Math.round(W / 5));  this.gh1 = Math.max(2, Math.round(H / 5));
-      this.gw2 = Math.max(2, Math.round(W / 20)); this.gh2 = Math.max(2, Math.round(H / 20));
-      this.g1.width = this.gw1; this.g1.height = this.gh1;
-      this.g2.width = this.gw2; this.g2.height = this.gh2;
-
-      this.buildStrands();
-      this.buildSpecks();
-      this.buildGrain();
-      this.buildVignette();
-    }
-
-    buildStrands() {
-      const { W } = this;
-      const k = W < 620 ? 0.65 : 1;
-      const s = [];
-      let x = -6;
-      while (x < W + 6) {
-        /* bundles: a run of tight strands, then a dark lane */
-        const span = rnd(40, 210) * k;
-        const dens = rnd(0.35, 1);
-        const end = x + span;
-        while (x < end && x < W + 6) {
-          const w = 0.7 + Math.pow(Math.random(), 2.3) * 4.6 * k;
-          const cold = Math.random() < 0.17;
-          s.push({
-            x, w, cold,
-            /* the dot-matrix grain: each strand is a column of pins */
-            bead: 1.6 + Math.random() * 3.6,
-            gapY: 1.2 + Math.random() * 3.4,
-            offY: Math.random() * 9,
-            base: 0.2 + Math.pow(Math.random(), 1.7) * 0.62,
-            ph  : Math.random() * 900,
-            freq: 0.018 + Math.random() * 0.14,
-            flare: Math.random() * 900
-          });
-          x += w + (0.8 + Math.pow(Math.random(), 1.7) * 8 * k) * (1.3 - dens * 0.6);
-        }
-        x += rnd(1, 22) * (1.25 - dens) * k;
-      }
-      this.strands = s;
-    }
-
-    buildSpecks() {
-      const n = Math.round((this.W * this.H) / 24000);
-      this.specks = [];
-      for (let i = 0; i < n; i++)
-        this.specks.push({ x: Math.random() * this.W, y: Math.random() * this.H, p: Math.random() * 900 });
-    }
-
-    buildGrain() {
-      const s = 168;
-      const c = document.createElement("canvas");
-      c.width = c.height = s;
-      const g = c.getContext("2d");
-      const im = g.createImageData(s, s);
-      for (let i = 0; i < im.data.length; i += 4) {
-        const v = 110 + Math.random() * 140;
-        im.data[i] = im.data[i + 1] = im.data[i + 2] = v;
-        im.data[i + 3] = Math.random() * 40;
-      }
-      g.putImageData(im, 0, 0);
-      this.grain = c;
-      this.grainPat = this.ctx.createPattern(c, "repeat");
-    }
-
-    buildVignette() {
-      const { W, H } = this;
-      const c = document.createElement("canvas");
-      c.width = Math.max(2, W); c.height = Math.max(2, H);
-      const g = c.getContext("2d");
-      const r = g.createRadialGradient(W * .5, H * .5, Math.min(W, H) * .12, W * .5, H * .5, Math.max(W, H) * .76);
-      r.addColorStop(0, "rgba(3,1,10,0)");
-      r.addColorStop(.55, "rgba(3,1,10,.42)");
-      r.addColorStop(1, "rgba(3,1,10,.98)");
-      g.fillStyle = r; g.fillRect(0, 0, W, H);
-      this.vign = c;
-    }
-
-    /* slow zones of pressure sliding along the wall */
-    zoneBoost(t, x) {
-      const { W } = this;
-      let v = 0;
-      for (const z of this.zones) {
-        const zx = W * (0.5 + 0.62 * N(t * z.sp, z.ph));
-        const d = (x - zx) / (W * z.w);
-        v += z.amp * Math.exp(-d * d * 0.5);
-      }
-      return v;
-    }
-
-    scheduleGlitch(t) {
-      const kinds = this.reduced ? ["sort"] : ["sort", "slice", "sort", "mosh"];
-      const kind = kinds[Math.random() * kinds.length | 0];
-      const g = { kind, t0: t, dur: 0.05 + Math.random() * 0.3 };
-      if (kind === "slice") {
-        g.strips = [];
-        const n = 2 + (Math.random() * 5 | 0);
-        for (let i = 0; i < n; i++)
-          g.strips.push({ y: Math.random() * this.H, h: 2 + Math.random() * 40, dx: rnd(-50, 50) });
-      }
-      if (kind === "sort") { g.y = Math.random() * this.H; g.h = 10 + Math.random() * 130; g.dur = 0.1 + Math.random() * 0.7; }
-      if (kind === "mosh") { g.dx = rnd(-16, 16); g.dur = 0.06 + Math.random() * 0.28; }
-      this.glitches.push(g);
-      this.nextGlitch = t + (this.reduced ? rnd(18, 44) : rnd(3, 19));
-    }
-
-    draw(t, dt) {
-      const { ctx, bx, W, H, DPR, cv, buf } = this;
-      const slow = this.reduced ? 0.3 : 1;
-      const B = this.breach;
-
-      if (t > this.nextGlitch) this.scheduleGlitch(t);
-      this.glitches = this.glitches.filter(g => t - g.t0 < g.dur);
-
-      /* ---------------- void ---------------- */
-      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      ctx.globalCompositeOperation = "source-over";
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#03010a";
-      ctx.fillRect(0, 0, W, H);
-
-      /* motes hanging in the dark */
-      ctx.globalCompositeOperation = "lighter";
-      for (const s of this.specks) {
-        const a = 0.03 + 0.22 * Math.pow(N01(t * 0.35 * slow, s.p), 4);
-        ctx.fillStyle = "rgba(226,206,232," + a.toFixed(3) + ")";
-        ctx.fillRect(s.x, s.y, 1, 1);
-      }
-      ctx.globalCompositeOperation = "source-over";
-
-      /* ---------------- strands ---------------- */
-      bx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      bx.clearRect(0, 0, W, H);
-      bx.globalCompositeOperation = "lighter";
-
-      const touched = B && B.active && B.env > 0.004;
-
-      for (const s of this.strands) {
-        const x = s.x;                                  /* fixed. strands do not drift. */
-        let v = s.base * (0.5 + 0.8 * N01(t * s.freq * slow, s.ph));
-        v += this.zoneBoost(t, x) * (0.35 + 0.5 * s.base);
-        if (!this.reduced && N(t * 0.9 + s.flare, s.ph * 0.7) > 0.955) v += 0.4;
-
-        const inBreach = touched && x > B.x0 - 4 && x < B.x1 + 4;
-
-        if (!inBreach) {
-          /* one dashed stroke per strand: the pin grain, almost free */
-          const lv = level(v);
-          if (lv < 1) continue;
-          bx.strokeStyle = s.cold ? LUT_COLD[lv] : LUT_WARM[lv];
-          bx.lineWidth = s.w;
-          bx.setLineDash([s.bead, s.gapY]);
-          bx.lineDashOffset = s.offY;
-          bx.beginPath();
-          bx.moveTo(x + s.w * 0.5, 0);
-          bx.lineTo(x + s.w * 0.5, H);
-          bx.stroke();
-        } else {
-          /* inside the incursion the pins are addressed one at a time:
-             the ones being pushed come forward — brighter and fatter —
-             and the wall itself is never broken open */
-          bx.setLineDash([]);
-          const step = s.bead + s.gapY;
-          const lut = s.cold ? LUT_COLD : LUT_WARM;
-          for (let y = s.offY - step; y < H; y += step) {
-            let f = 0;
-            if (y > B.y0 - 20 && y < B.y1 + 20) f = B.field(x, y + s.bead * 0.5);
-            if (f <= 0.002) {
-              const lv = level(v);
-              if (lv > 0) { bx.fillStyle = lut[lv]; bx.fillRect(x, y, s.w, s.bead); }
-              continue;
-            }
-            /* the pin comes forward: it lengthens and thickens and picks up
-               light, but the gap above it never closes, so the shape stays
-               legible as a field of pins rather than a solid hole */
-            const lv = level(v + f * 0.2);
-            const maxBead = step * 0.88;
-            const bead = Math.min(maxBead, s.bead * (1 + f * 1.35));
-            const wid = s.w * (1 + f * 0.5);
-            bx.fillStyle = lut[lv];
-            bx.fillRect(x - (wid - s.w) * 0.5, y - (bead - s.bead) * 0.5, wid, bead);
-          }
-        }
-      }
-      bx.setLineDash([]);
-
-      /* no visible top or bottom edge */
-      bx.globalCompositeOperation = "destination-in";
-      const m = bx.createLinearGradient(0, 0, 0, H);
-      m.addColorStop(0, "rgba(0,0,0,0.05)");
-      m.addColorStop(.16, "rgba(0,0,0,0.8)");
-      m.addColorStop(.5, "rgba(0,0,0,1)");
-      m.addColorStop(.86, "rgba(0,0,0,0.78)");
-      m.addColorStop(1, "rgba(0,0,0,0.05)");
-      bx.fillStyle = m;
-      bx.fillRect(0, 0, W, H);
-      bx.globalCompositeOperation = "source-over";
-
-      ctx.drawImage(buf, 0, 0, buf.width, buf.height, 0, 0, W, H);
-
-      /* ---------------- bloom ---------------- */
-      this.g1x.clearRect(0, 0, this.gw1, this.gh1);
-      this.g1x.drawImage(buf, 0, 0, buf.width, buf.height, 0, 0, this.gw1, this.gh1);
-      this.g2x.clearRect(0, 0, this.gw2, this.gh2);
-      this.g2x.drawImage(this.g1, 0, 0, this.gw1, this.gh1, 0, 0, this.gw2, this.gh2);
-
-      ctx.globalCompositeOperation = "lighter";
-      ctx.globalAlpha = 0.26;
-      ctx.drawImage(this.g1, 0, 0, this.gw1, this.gh1, 0, 0, W, H);
-      ctx.globalAlpha = 0.3;
-      ctx.drawImage(this.g2, 0, 0, this.gw2, this.gh2, -W * 0.02, -H * 0.02, W * 1.04, H * 1.04);
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = "source-over";
-
-      /* ---------------- corruption ---------------- */
-      for (const g of this.glitches) {
-        if (g.kind === "slice") {
-          for (const st of g.strips)
-            ctx.drawImage(cv, 0, st.y * DPR, cv.width, st.h * DPR, st.dx, st.y, W, st.h);
-        } else if (g.kind === "sort") {
-          /* pixel sort: one row smeared down a band, the way the game's
-             post-process shreds the image near the wall */
-          const src = clamp(g.y, 0, H - 1);
-          ctx.globalAlpha = 0.85;
-          ctx.drawImage(cv, 0, src * DPR, cv.width, 1, 0, src, W, g.h);
-          ctx.globalAlpha = 1;
-        } else if (g.kind === "mosh") {
-          ctx.globalCompositeOperation = "lighter";
-          ctx.globalAlpha = 0.26;
-          ctx.drawImage(cv, 0, 0, cv.width, cv.height, g.dx, 0, W, H);
-          ctx.globalAlpha = 1;
-          ctx.globalCompositeOperation = "source-over";
-        }
-      }
-
-      /* the air in front of the wall carries a faint charge; nothing here
-         ever sits at pure black */
-      ctx.globalCompositeOperation = "lighter";
-      ctx.fillStyle = "rgba(54,14,38,0.07)";
-      ctx.fillRect(0, 0, W, H);
-      for (const z of this.zones) {
-        const zx = W * (0.5 + 0.62 * N(t * z.sp, z.ph));
-        const rr = W * (0.34 + z.w * 2.2);
-        const gr = ctx.createRadialGradient(zx, H * 0.5, 0, zx, H * 0.5, rr);
-        gr.addColorStop(0, "rgba(150,44,96,0.075)");
-        gr.addColorStop(0.5, "rgba(96,26,68,0.032)");
-        gr.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = gr;
-        ctx.fillRect(zx - rr, 0, rr * 2, H);
-      }
-      ctx.globalCompositeOperation = "source-over";
-
-      /* ---------------- film ---------------- */
-      if (this.grainPat) {
-        ctx.globalAlpha = 0.05;
-        const gx = -Math.random() * 168, gy = -Math.random() * 168;
-        ctx.save(); ctx.translate(gx, gy);
-        ctx.fillStyle = this.grainPat;
-        ctx.fillRect(-gx, -gy, W, H);
-        ctx.restore();
-        ctx.globalAlpha = 1;
-      }
-      if (this.vign) ctx.drawImage(this.vign, 0, 0, W, H);
-    }
-  };
-})();
-
-/* The sound of standing in front of it.
-   Nothing here is a sample and nothing is on a timer that repeats: the
-   drones sit on a permanent random walk, and every event is scheduled at
-   a random distance from the last one. */
-(function () {
-  "use strict";
-  const BW = window.BW = window.BW || {};
-  const { rnd } = BW;
-
-  BW.Sound = class Sound {
-    constructor() {
-      this.ac = null;
-      this.started = false;
-      this.drones = [];
-      this.timers = [];
-    }
-
-    get time() { return this.ac.currentTime; }
-
-    async start() {
-      if (this.started) return true;
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return false;
-      const ac = new AC();
-      try { await ac.resume(); } catch (e) {}
-      if (ac.state !== "running") { try { ac.close(); } catch (e) {} return false; }
-      this.ac = ac;
-      this.started = true;
-      this.build();
-      return true;
-    }
-
-    impulse(sec, decay) {
-      const ac = this.ac, len = Math.floor(ac.sampleRate * sec);
-      const buf = ac.createBuffer(2, len, ac.sampleRate);
-      for (let c = 0; c < 2; c++) {
-        const d = buf.getChannelData(c);
-        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
-      }
-      return buf;
-    }
-
-    noise(sec, brown) {
-      const ac = this.ac, len = Math.floor(ac.sampleRate * sec);
-      const buf = ac.createBuffer(1, len, ac.sampleRate);
-      const d = buf.getChannelData(0);
-      let l = 0;
-      for (let i = 0; i < len; i++) {
-        const w = Math.random() * 2 - 1;
-        if (brown) { l = (l + 0.019 * w) / 1.019; d[i] = l * 3.4; }
-        else d[i] = w;
-      }
-      return buf;
-    }
-
-    shaper(amt) {
-      const ws = new Float32Array(1024);
-      for (let i = 0; i < 1024; i++) {
-        const x = i / 512 - 1;
-        ws[i] = (1 + amt) * x / (1 + amt * Math.abs(x));
-      }
-      const n = this.ac.createWaveShaper();
-      n.curve = ws; n.oversample = "2x";
-      return n;
-    }
-
-    build() {
-      const ac = this.ac;
-
-      this.master = ac.createGain();
-      this.master.gain.value = 0;
-
-      const comp = ac.createDynamicsCompressor();
-      comp.threshold.value = -24; comp.ratio.value = 8; comp.release.value = 0.45;
-      const shelf = ac.createBiquadFilter();
-      shelf.type = "highshelf"; shelf.frequency.value = 4600; shelf.gain.value = -18;
-
-      this.master.connect(comp); comp.connect(shelf); shelf.connect(ac.destination);
-
-      /* something enormous, a long way off */
-      const verb = ac.createConvolver();
-      verb.buffer = this.impulse(9, 2.4);
-      this.wet = ac.createGain(); this.wet.gain.value = 0.9;
-      this.wet.connect(verb); verb.connect(this.master);
-
-      [[32.7, 0.55, "sine"], [38.9, 0.36, "sine"], [49.0, 0.22, "triangle"], [65.4, 0.1, "sawtooth"]]
-        .forEach(([f, g, type], i) => {
-          const o = ac.createOscillator(); o.type = type; o.frequency.value = f;
-          const lp = ac.createBiquadFilter();
-          lp.type = "lowpass"; lp.frequency.value = 150 + i * 80; lp.Q.value = 3;
-          const gn = ac.createGain(); gn.gain.value = g;
-          o.connect(lp); lp.connect(gn); gn.connect(this.master); gn.connect(this.wet);
-          o.start();
-          this.drones.push({ o, gn, lp, base: f, baseG: g });
-        });
-
-      this.nsrc = ac.createBufferSource();
-      this.nsrc.buffer = this.noise(43, true);
-      this.nsrc.loop = true;
-      this.nfilt = ac.createBiquadFilter();
-      this.nfilt.type = "bandpass"; this.nfilt.frequency.value = 320; this.nfilt.Q.value = 0.7;
-      const ng = ac.createGain(); ng.gain.value = 0.45;
-      this.nsrc.connect(this.nfilt); this.nfilt.connect(ng);
-      ng.connect(this.master); ng.connect(this.wet);
-      this.nsrc.start();
-
-      this.master.gain.setTargetAtTime(0.27, this.time, 7);
-      this.drift();
-      this.schedule();
-    }
-
-    drift() {
-      if (!this.ac) return;
-      const now = this.time;
-      for (const d of this.drones) {
-        d.o.frequency.setTargetAtTime(d.base * rnd(0.986, 1.015), now, rnd(5, 16));
-        d.gn.gain.setTargetAtTime(d.baseG * rnd(0.45, 1.2), now, rnd(6, 18));
-        d.lp.frequency.setTargetAtTime(rnd(70, 400), now, rnd(7, 20));
-      }
-      this.nfilt.frequency.setTargetAtTime(rnd(110, 1700), now, rnd(5, 14));
-      this.nfilt.Q.setTargetAtTime(rnd(0.4, 5), now, 9);
-      this.nsrc.playbackRate.setTargetAtTime(rnd(0.7, 1.15), now, 11);
-      this.timers.push(setTimeout(() => this.drift(), rnd(3600, 12000)));
-    }
-
-    /* --- one-shot events --- */
-    voice() {                       /* human speech, made unsafe */
-      const ac = this.ac, now = this.time, dur = rnd(1.8, 6);
-      const src = ac.createBufferSource();
-      src.buffer = this.noise(7, false);
-      src.playbackRate.value = rnd(0.3, 0.85);
-      const out = ac.createGain(); out.gain.value = 0;
-      const fs = [rnd(260, 780), rnd(880, 2000), rnd(2200, 3100)];
-      fs.forEach((f, i) => {
-        const bp = ac.createBiquadFilter();
-        bp.type = "bandpass"; bp.frequency.value = f; bp.Q.value = rnd(12, 30);
-        const g = ac.createGain(); g.gain.value = [1, .5, .22][i];
-        src.connect(bp); bp.connect(g); g.connect(out);
-        bp.frequency.setTargetAtTime(f * rnd(0.55, 1.7), now + dur * 0.3, dur * 0.5);
-      });
-      out.connect(this.master); out.connect(this.wet);
-      out.gain.linearRampToValueAtTime(rnd(0.04, 0.13), now + rnd(0.4, 1.3));
-      out.gain.setTargetAtTime(0.0001, now + dur * 0.55, dur * 0.3);
-      src.start(now); src.stop(now + dur + .3);
-    }
-
-    screech() {                     /* carrier, corrupted */
-      const ac = this.ac, now = this.time, dur = rnd(0.4, 2.4);
-      const c = ac.createOscillator(), m = ac.createOscillator(), mg = ac.createGain();
-      c.type = "sawtooth"; m.type = "square";
-      c.frequency.value = rnd(200, 1400);
-      m.frequency.value = rnd(18, 300);
-      mg.gain.value = rnd(180, 2200);
-      m.connect(mg); mg.connect(c.frequency);
-      const bp = ac.createBiquadFilter();
-      bp.type = "bandpass"; bp.frequency.value = rnd(600, 3200); bp.Q.value = rnd(2, 12);
-      const g = ac.createGain(); g.gain.value = 0;
-      c.connect(bp); bp.connect(this.shaper(6)).connect(g);
-      g.connect(this.master); g.connect(this.wet);
-      g.gain.linearRampToValueAtTime(rnd(0.02, 0.1), now + rnd(0.01, 0.3));
-      g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      c.frequency.setTargetAtTime(rnd(100, 2400), now, dur * 0.6);
-      c.start(now); m.start(now); c.stop(now + dur + .1); m.stop(now + dur + .1);
-    }
-
-    pulse() {                       /* packets */
-      const ac = this.ac, now = this.time, n = 2 + (Math.random() * 8 | 0);
-      for (let i = 0; i < n; i++) {
-        const o = ac.createOscillator(); o.type = "square";
-        o.frequency.value = rnd(55, 800);
-        const g = ac.createGain(); g.gain.value = 0;
-        o.connect(this.shaper(28)).connect(g); g.connect(this.master); g.connect(this.wet);
-        const s = now + i * rnd(0.03, 0.16);
-        g.gain.setValueAtTime(rnd(0.012, 0.05), s);
-        g.gain.exponentialRampToValueAtTime(0.0001, s + rnd(0.02, 0.1));
-        o.start(s); o.stop(s + 0.2);
-      }
-    }
-
-    swell() {                       /* pressure from the far side */
-      const ac = this.ac, now = this.time, dur = rnd(7, 20);
-      const src = ac.createBufferSource();
-      src.buffer = this.noise(22, true); src.loop = true;
-      const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 55; lp.Q.value = 8;
-      const g = ac.createGain(); g.gain.value = 0;
-      src.connect(lp); lp.connect(g); g.connect(this.master); g.connect(this.wet);
-      g.gain.linearRampToValueAtTime(rnd(0.09, 0.26), now + dur * 0.55);
-      g.gain.linearRampToValueAtTime(0, now + dur);
-      lp.frequency.exponentialRampToValueAtTime(rnd(180, 1400), now + dur * 0.55);
-      lp.frequency.exponentialRampToValueAtTime(45, now + dur);
-      src.start(now); src.stop(now + dur + .3);
-    }
-
-    impact() {
-      const ac = this.ac, now = this.time, dur = rnd(2, 5);
-      const o = ac.createOscillator(); o.type = "sine";
-      o.frequency.setValueAtTime(rnd(62, 120), now);
-      o.frequency.exponentialRampToValueAtTime(rnd(18, 28), now + dur * 0.7);
-      const g = ac.createGain(); g.gain.value = 0;
-      o.connect(this.shaper(3)).connect(g); g.connect(this.master); g.connect(this.wet);
-      g.gain.linearRampToValueAtTime(rnd(0.12, 0.3), now + 0.04);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      o.start(now); o.stop(now + dur + .1);
-    }
-
-    schedule() {
-      if (!this.ac) return;
-      const pool = ["voice", "voice", "swell", "screech", "pulse", "impact", "swell", "voice"];
-      try { this[pool[Math.random() * pool.length | 0]](); } catch (e) {}
-      this.timers.push(setTimeout(() => this.schedule(), rnd(3500, 22000)));
-    }
-
-    /* called when something starts pushing on the wall */
-    breach() {
-      if (!this.ac) return;
-      try {
-        this.impact();
-        setTimeout(() => { try { this.voice(); } catch (e) {} }, 400 + Math.random() * 1100);
-        setTimeout(() => { try { this.screech(); } catch (e) {} }, 1200 + Math.random() * 2600);
-      } catch (e) {}
-    }
-  };
-})();
-
-(function () {
-  "use strict";
-  const BW = window.BW;
-
-  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  const wall   = new BW.Wall(document.getElementById("wall"), { reduced });
-  const breach = new BW.Breach();
-  const sound  = new BW.Sound();
-  wall.breach = breach;
-  breach.onOpen = () => sound.breach();
-
-  let last = 0, running = true;
-
-  function frame(now) {
-    if (!running) return;
-    requestAnimationFrame(frame);
-    const t = now / 1000;
-    const dt = Math.min(0.05, t - last || 0.016);
-    last = t;
-    breach.update(t, wall.W, wall.H);
-    wall.draw(t, dt);
   }
 
-  const gate = document.getElementById("gate");
-  async function open() {
-    const ok = await sound.start();
-    if (ok) gate.classList.remove("open");
-    return ok;
+  /* atmosphere: the air in front of it is not empty */
+  col *= exp(-t*0.0135);
+  col += vec3(0.0078, 0.0007, 0.0027) * (1.0 - exp(-t*0.052));
+
+  /* ---- grade ---- */
+  col *= (1.0 + uPulse*0.35) * (0.97 + 0.03*vnoise(uT*0.6));
+  col = aces(col * 0.92);
+  col = pow(col, vec3(1.0/2.2));
+
+  float lum = dot(col, vec3(0.299, 0.587, 0.114));
+  col = mix(vec3(lum), col, 1.05);
+
+  col *= 0.975 + 0.025*sin(frag.y*PI + uT*1.7);
+  col += (hash21(frag + fract(uT)*vec2(97.1, 31.7)) - 0.5) * 0.028;
+  vec2 q = frag/uRes;
+  col *= 0.52 + 0.48*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.22);
+
+  col *= uEnter;
+  O = vec4(max(col, 0.0), 1.0);
+}`;
+
+/* ================================================================
+   GL
+   ================================================================ */
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); return; }
+gl.useProgram(prog);
+gl.bindVertexArray(gl.createVertexArray());
+
+const U = {
+  res:   gl.getUniformLocation(prog, "uRes"),
+  t:     gl.getUniformLocation(prog, "uT"),
+  pulse: gl.getUniformLocation(prog, "uPulse"),
+  enter: gl.getUniformLocation(prog, "uEnter"),
+  calm:  gl.getUniformLocation(prog, "uCalm")
+};
+gl.uniform1f(U.calm, CALM);
+
+function resize(){
+  const cap = window.innerWidth < 800 ? 1.15 : 1.35;
+  const dpr = Math.min(window.devicePixelRatio || 1, cap);
+  const w = Math.max(2, Math.floor(innerWidth * dpr));
+  const h = Math.max(2, Math.floor(innerHeight * dpr));
+  if (cvs.width !== w || cvs.height !== h){
+    cvs.width = w; cvs.height = h;
+    gl.viewport(0, 0, w, h);
+    gl.uniform2f(U.res, w, h);
   }
-  gate.addEventListener("click", open);
-  gate.addEventListener("keydown", e => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
-  });
+}
+resize();
+addEventListener("resize", resize, { passive:true });
 
-  let rt = null;
-  window.addEventListener("resize", () => {
-    clearTimeout(rt);
-    rt = setTimeout(() => wall.resize(), 120);
-  }, { passive: true });
+let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = true;
+function strike(a){ pulse = Math.min(1.3, pulse + a); }
 
-  document.addEventListener("visibilitychange", () => {
-    running = !document.hidden;
-    if (running) { last = performance.now() / 1000; requestAnimationFrame(frame); }
-  });
-
+function frame(now){
+  if (!running) return;
+  clockT = (now - t0) / 1000;
+  pulse *= 0.945;
+  enter += (1.0 - enter) * 0.0075;
+  gl.uniform1f(U.t, clockT);
+  gl.uniform1f(U.pulse, pulse);
+  gl.uniform1f(U.enter, enter);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
-  open().then(ok => { if (!ok) gate.classList.add("open"); });
+}
+requestAnimationFrame(frame);
+
+document.addEventListener("visibilitychange", () => {
+  running = !document.hidden;
+  if (running){ t0 = performance.now() - clockT*1000; requestAnimationFrame(frame); if (AC && audioReady) AC.resume(); }
+  else if (AC) AC.suspend();
+});
+
+/* ================================================================
+   AUDIO — synthesised, no assets, no controls
+   ================================================================ */
+let AC = null, bus = null, master = null, audioReady = false;
+
+function impulse(dur, decay){
+  const rate = AC.sampleRate, len = Math.floor(rate*dur);
+  const buf = AC.createBuffer(2, len, rate);
+  for (let ch = 0; ch < 2; ch++){
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < len; i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, decay);
+  }
+  return buf;
+}
+function noiseBuf(sec){
+  const rate = AC.sampleRate, len = Math.floor(rate*sec);
+  const buf = AC.createBuffer(1, len, rate);
+  const d = buf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < len; i++){ const w = Math.random()*2-1; last = (last + 0.02*w)/1.02; d[i] = last*3.5; }
+  return buf;
+}
+function lfo(rate, depth, param, base){
+  const o = AC.createOscillator(); o.frequency.value = rate;
+  const g = AC.createGain(); g.gain.value = depth;
+  o.connect(g); g.connect(param);
+  if (base !== undefined) param.value = base;
+  o.start(); return o;
+}
+function panned(node){
+  if (AC.createStereoPanner){
+    const p = AC.createStereoPanner();
+    p.pan.value = Math.random()*1.6 - 0.8;
+    node.connect(p); p.connect(bus);
+  } else node.connect(bus);
+}
+
+function buildAudio(){
+  master = AC.createGain(); master.gain.value = 0.0001;
+  const comp = AC.createDynamicsCompressor();
+  comp.threshold.value = -20; comp.ratio.value = 6; comp.knee.value = 12;
+  master.connect(comp); comp.connect(AC.destination);
+
+  const conv = AC.createConvolver(); conv.buffer = impulse(6.0, 2.4);
+  const wet = AC.createGain(); wet.gain.value = 0.60;
+  const dry = AC.createGain(); dry.gain.value = 0.85;
+  conv.connect(wet); wet.connect(master); dry.connect(master);
+  bus = AC.createGain(); bus.connect(dry); bus.connect(conv);
+
+  /* the slab itself */
+  const df = AC.createBiquadFilter();
+  df.type = "lowpass"; df.frequency.value = 230; df.Q.value = 0.7;
+  df.connect(bus);
+  lfo(0.019, 85, df.frequency, 230);
+  [36.71, 43.65, 55.00, 73.42, 36.86].forEach((f, i) => {
+    const o = AC.createOscillator();
+    o.type = i % 2 ? "triangle" : "sine";
+    o.frequency.value = f;
+    const g = AC.createGain(); g.gain.value = [0.34,0.20,0.16,0.09,0.22][i];
+    lfo(0.013 + i*0.007, 0.055, g.gain, g.gain.value);
+    lfo(0.030 + i*0.011, 0.35, o.detune, 0);
+    o.connect(g); g.connect(df); o.start();
+  });
+
+  /* pressure from the far side */
+  const nz = AC.createBufferSource(); nz.buffer = noiseBuf(6); nz.loop = true;
+  const bp = AC.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 1.1;
+  const ng = AC.createGain();
+  nz.connect(bp); bp.connect(ng); ng.connect(bus); nz.start();
+  lfo(0.035, 360, bp.frequency, 500);
+  lfo(0.011, 0.040, ng.gain, 0.100);
+
+  /* ICE hum */
+  const hf = AC.createBiquadFilter(); hf.type = "lowpass"; hf.frequency.value = 1050; hf.Q.value = 3.0;
+  const hg = AC.createGain();
+  hf.connect(hg); hg.connect(bus);
+  [220.5, 293.66, 440.9].forEach((f, i) => {
+    const o = AC.createOscillator(); o.type = "sawtooth"; o.frequency.value = f;
+    const g = AC.createGain(); g.gain.value = [0.5,0.3,0.16][i];
+    lfo(0.09 + i*0.05, 6.0, o.detune, 0);
+    o.connect(g); g.connect(hf); o.start();
+  });
+  lfo(0.07, 0.013, hg.gain, 0.024);
+
+  master.gain.setValueAtTime(0.0001, AC.currentTime);
+  master.gain.exponentialRampToValueAtTime(0.55, AC.currentTime + 12);
+  audioReady = true;
+}
+
+function ping(){
+  const scale = [146.83,174.61,220.00,261.63,293.66,349.23,440.00,587.33];
+  const f = scale[(Math.random()*scale.length)|0] * (Math.random() < 0.25 ? 2 : 1);
+  const o = AC.createOscillator(); o.type = Math.random() < 0.5 ? "sine" : "triangle";
+  o.frequency.value = f;
+  o.frequency.exponentialRampToValueAtTime(f*0.985, AC.currentTime + 3.0);
+  const g = AC.createGain(); g.gain.value = 0.0001;
+  g.gain.exponentialRampToValueAtTime(0.14, AC.currentTime + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 3.2);
+  o.connect(g); panned(g);
+  o.start(); o.stop(AC.currentTime + 3.4);
+  strike(0.6);
+}
+function whisper(){
+  const dur = 0.7 + Math.random()*1.1;
+  const s = AC.createBufferSource(); s.buffer = noiseBuf(2); s.loop = true;
+  const f1 = AC.createBiquadFilter(); f1.type = "bandpass"; f1.Q.value = 9;
+  f1.frequency.setValueAtTime(480 + Math.random()*420, AC.currentTime);
+  f1.frequency.linearRampToValueAtTime(1300 + Math.random()*1400, AC.currentTime + dur);
+  const g = AC.createGain(); g.gain.value = 0.0001;
+  g.gain.exponentialRampToValueAtTime(0.065, AC.currentTime + dur*0.35);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + dur);
+  s.connect(f1); f1.connect(g); panned(g);
+  s.start(); s.stop(AC.currentTime + dur + 0.1);
+  strike(0.30);
+}
+function groan(){
+  const o = AC.createOscillator(); o.type = "sawtooth";
+  o.frequency.setValueAtTime(62, AC.currentTime);
+  o.frequency.exponentialRampToValueAtTime(27, AC.currentTime + 5.5);
+  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 145; f.Q.value = 4;
+  const g = AC.createGain(); g.gain.value = 0.0001;
+  g.gain.exponentialRampToValueAtTime(0.26, AC.currentTime + 1.4);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 6.0);
+  o.connect(f); f.connect(g); g.connect(bus);
+  o.start(); o.stop(AC.currentTime + 6.2);
+  strike(0.95);
+}
+function scheduleEvents(){
+  setTimeout(() => {
+    if (audioReady && AC.state === "running"){
+      const r = Math.random();
+      if (r < 0.52) ping(); else if (r < 0.88) whisper(); else groan();
+    }
+    scheduleEvents();
+  }, 5000 + Math.random()*14000);
+}
+
+function bootAudio(){
+  if (AC) { if (AC.state !== "running") AC.resume(); return; }
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    buildAudio();
+    scheduleEvents();
+    if (AC.state !== "running") AC.resume();
+  } catch (e) { /* silent */ }
+}
+bootAudio();
+["pointerdown","keydown","touchstart","wheel"].forEach(ev =>
+  addEventListener(ev, bootAudio, { once:true, passive:true }));
+
 })();
 </script>
 </body>
