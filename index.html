@@ -13,11 +13,11 @@
   /* faint anamorphic veil + tube interlace, purely optical */
   .veil{position:fixed;inset:0;pointer-events:none;mix-blend-mode:screen;
     background:
-      radial-gradient(130% 75% at 58% 40%, rgba(255,24,40,.055) 0%, rgba(255,24,40,0) 64%),
-      radial-gradient(95% 60% at 18% 82%, rgba(120,30,255,.045) 0%, rgba(120,30,255,0) 72%);
+      radial-gradient(130% 70% at 56% 46%, rgba(255,26,54,.050) 0%, rgba(255,26,54,0) 66%),
+      radial-gradient(90% 55% at 14% 78%, rgba(30,120,255,.032) 0%, rgba(30,120,255,0) 74%);
     animation:breathe 23s ease-in-out infinite}
   @keyframes breathe{0%,100%{opacity:.7}50%{opacity:1}}
-  .crt{position:fixed;inset:0;pointer-events:none;opacity:.16;
+  .crt{position:fixed;inset:0;pointer-events:none;opacity:.11;
     background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.6) 3px,rgba(0,0,0,0) 4px)}
   @media (prefers-reduced-motion:reduce){.veil{animation:none}}
 </style>
@@ -35,6 +35,9 @@ const cvs = document.getElementById("gl");
 const gl = cvs.getContext("webgl2", { antialias:false, alpha:false, powerPreference:"high-performance", desynchronized:true });
 if (!gl) return;
 
+/* float render targets let the conduits carry real overbright values, so the
+   glow around them comes from the light itself rather than a painted-on haze. */
+const HDR = !!gl.getExtension("EXT_color_buffer_float");
 const CALM = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1.0 : 0.0;
 
 /* ================================================================
@@ -46,17 +49,18 @@ void main(){
   gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }`;
 
-const FRAG = `#version 300 es
+/* ---------------------------------------------------------------- scene */
+const FRAG_SCENE = `#version 300 es
 precision highp float;
 out vec4 O;
 
 uniform vec2  uRes;
 uniform float uT;
 uniform float uPulse;
-uniform float uEnter;
 uniform float uCalm;
 uniform float uBT;      // seconds since the current breach began
 uniform vec2  uBP;      // where on the barrier it is pressing
+uniform float uHdr;     // 1 = float target, 0 = 8-bit fallback
 
 #define PI 3.141592653589793
 
@@ -65,6 +69,17 @@ float hash21(vec2 p){ vec3 q = fract(vec3(p.xyx)*vec3(0.1031,0.1030,0.0973));
                       q += dot(q, q.yzx+33.33); return fract((q.x+q.y)*q.z); }
 float vnoise(float x){ float i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
                        return mix(hash11(i), hash11(i+1.0), f); }
+float n2(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0-2.0*f);
+  return mix(mix(hash21(i), hash21(i+vec2(1.0,0.0)), f.x),
+             mix(hash21(i+vec2(0.0,1.0)), hash21(i+vec2(1.0,1.0)), f.x), f.y);
+}
+float fbm2(vec2 p){
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++){ s += a*n2(p); p = p*2.07 + 7.1; a *= 0.5; }
+  return s;
+}
 
 /* ---------------- one filament of the barrier ---------------- */
 struct Col { vec3 c; float b; float w; };
@@ -78,16 +93,20 @@ Col column(float i, float v){
   /* hairlines mostly, a few heavier conduits */
   float w = 0.042 + 0.130*a*a*a;
 
-  /* palette: arterial red dominant, magenta veins, rare cold ICE.
-     desaturated slightly toward sensor response rather than pure primaries */
+  /* palette: arterial red dominant, hot magenta where the load is highest,
+     whole stretches of indigo where NetWatch ICE is still holding, and the
+     odd run of cold cyan. the noise is smooth in i, so colours arrive in
+     bands of neighbouring conduits rather than one filament at a time. */
   float n = vnoise(i*0.062 + uT*0.011)*0.66 + vnoise(i*0.24 - uT*0.007)*0.34;
-  vec3 red = vec3(1.00, 0.070, 0.100);
-  vec3 mag = vec3(1.00, 0.105, 0.40);
-  vec3 vio = vec3(0.62, 0.15, 0.95);
-  vec3 ice = vec3(0.42, 0.70, 1.00);
-  vec3 col = mix(red, mag, smoothstep(0.44, 0.74, n));
-  col = mix(col, vio, smoothstep(0.80, 0.92, n));
-  col = mix(col, ice, smoothstep(0.945, 0.995, n));
+  vec3 red = vec3(1.00, 0.045, 0.075);
+  vec3 ros = vec3(1.00, 0.090, 0.210);
+  vec3 mag = vec3(1.00, 0.070, 0.480);
+  vec3 ind = vec3(0.30, 0.19, 1.00);
+  vec3 ice = vec3(0.25, 0.68, 1.00);
+  vec3 col = mix(red, ros, smoothstep(0.26, 0.58, n));
+  col = mix(col, mag, smoothstep(0.64, 0.83, n));
+  col = mix(col, ind, smoothstep(0.855, 0.945, n));
+  col = mix(col, ice, smoothstep(0.965, 0.996, n));
 
   /* traffic along the filament — continuous, faintly segmented */
   float dir = b > 0.5 ? 1.0 : -1.0;
@@ -102,6 +121,18 @@ Col column(float i, float v){
 
   float bri = (0.30 + 1.75*b*b) * seg * fl * drop;
   bri += pk * 1.10 * b;
+
+  /* the traffic is characters, not light. most conduits quantise into
+     cells that gate on and off; at this distance it is only ever texture. */
+  float gk = hash11(i*2.9 + 71.0);
+  if (gk > 0.46){
+    float gy  = y * 3.7;
+    float on  = hash21(vec2(i*1.13, floor(gy)));
+    float ink = mix(0.22, 1.30, step(0.38, on));
+    /* leave a hairline gutter between cells so it reads as a stack */
+    ink *= 0.55 + 0.45*smoothstep(0.0, 0.10, fract(gy)) * smoothstep(1.0, 0.90, fract(gy));
+    bri *= mix(1.0, ink, smoothstep(0.46, 0.62, gk));
+  }
 
   float scan = exp(-pow(fract(v*0.058 - uT*0.026)-0.5, 2.0)*62.0);
   bri *= 1.0 + scan*0.40;
@@ -119,20 +150,14 @@ Col column(float i, float v){
    the barrier behaves like a pin board: each filament can only travel
    toward the viewer, so a body leaning on the back of it shows up as a
    dome, an expanding shock ring and a train of standing ripples.       */
-float n2(vec2 p){
-  vec2 i = floor(p), f = fract(p);
-  f = f*f*(3.0-2.0*f);
-  return mix(mix(hash21(i), hash21(i+vec2(1.0,0.0)), f.x),
-             mix(hash21(i+vec2(0.0,1.0)), hash21(i+vec2(1.0,1.0)), f.x), f.y);
-}
-float fbm2(vec2 p){
-  float s = 0.0, a = 0.5;
-  for (int i = 0; i < 3; i++){ s += a*n2(p); p = p*2.07 + 7.1; a *= 0.5; }
-  return s;
-}
 float breachEnv(){
-  if (uBT < 0.0 || uBT > 10.0) return 0.0;
-  return smoothstep(0.0, 0.20, uBT) * exp(-max(uBT-0.20, 0.0)*0.60);
+  const float LIFE = 17.0;
+  if (uBT < 0.0 || uBT > LIFE) return 0.0;
+  /* it leans, it holds, it gives up: a swell rather than an impact.
+     the tail is faded out before the cut so nothing ever pops off. */
+  float rise = smoothstep(0.0, 1.00, uBT);
+  float fall = exp(-max(uBT - 1.00, 0.0) * 0.155);
+  return rise * fall * (1.0 - smoothstep(LIFE - 5.0, LIFE, uBT));
 }
 float breachH(vec2 p){
   float env = breachEnv();
@@ -143,7 +168,7 @@ float breachH(vec2 p){
   /* domain warp: whatever is behind this has no shape worth naming */
   vec2 w1 = vec2(fbm2(q*0.23 + sd), fbm2(q*0.23 + sd + 47.9)) - 0.5;
   q += w1 * 7.0;
-  vec2 w2 = vec2(fbm2(q*0.55 + uBT*0.30), fbm2(q*0.55 + 91.0 - uBT*0.24)) - 0.5;
+  vec2 w2 = vec2(fbm2(q*0.55 + uBT*0.165), fbm2(q*0.55 + 91.0 - uBT*0.132)) - 0.5;
   q += w2 * 3.0;
 
   float r = length(q);
@@ -160,9 +185,9 @@ float breachH(vec2 p){
   }
 
   float grain = fbm2(q*0.42 + 21.0);
-  float front = uBT*3.0;
+  float front = uBT*1.70;
   float ring   = exp(-pow(r - front, 2.0)*0.26) * 0.85 * (0.35 + 1.20*grain);
-  float ripple = cos(r*2.10 - uBT*7.0 + grain*7.0) * exp(-r*r*0.030) * 0.38;
+  float ripple = cos(r*2.10 - uBT*3.20 + grain*7.0) * exp(-r*r*0.030) * 0.38;
 
   /* frayed edge — it tears through rather than bulging out */
   float mask = smoothstep(0.16, 0.68, grain*0.85 + 0.42);
@@ -199,7 +224,7 @@ vec3 wall(vec2 p, float foot, float ca, float bh){
     float inner = clamp((hw*0.42 - abs(dd))/aa + 0.5, 0.0, 1.0);
     sharp += mix(c.c, vec3(1.0, 0.96, 0.94), 0.78) * inner * c.b * 0.32;
 
-    halo += c.c * c.b * (exp(-dd*dd*0.85)*0.030 + 0.0080/(1.0 + dd*dd*0.85));
+    halo += c.c * c.b * (exp(-dd*dd*1.30)*0.022 + 0.0022/(1.0 + dd*dd*1.40));
     avg  += c.c * c.b * c.w;
   }
   avg /= 9.0;
@@ -207,87 +232,127 @@ vec3 wall(vec2 p, float foot, float ca, float bh){
   float m = smoothstep(0.10, 1.05, aa);
   vec3 col = mix(sharp, avg*1.05, m) + halo;
 
-  col += vec3(0.20, 0.012, 0.038) * 0.045 * smoothstep(17.0, 0.4, p.y);
+  col += vec3(0.18, 0.010, 0.034) * 0.018 * smoothstep(17.0, 0.4, p.y);
 
-  /* motes hanging in the field */
+  /* the conduits root into the plain rather than meeting it in a line:
+     a short, uneven flare at the base and nothing more */
+  col += vec3(1.00, 0.16, 0.24) * exp(-p.y*p.y*3.2) * 0.30
+         * (0.45 + 0.55*vnoise(p.x*0.42 + uT*0.045));
+
+  /* white specks hanging in the field, like dust in a projector beam */
   vec2 sc = floor(p*1.55);
   float sh = hash21(sc + 5.0);
   vec2  sf = (fract(p*1.55) - vec2(hash21(sc+13.0), hash21(sc+29.0))) / 1.55;
-  float sd = length(sf) / max(0.022, foot*0.5);
-  col += vec3(0.72, 0.67, 0.78) * step(0.9935, sh) * exp(-sd*sd*1.9)
-         * (0.30 + 0.70*hash21(sc+71.0)) * 0.60 * smoothstep(2.0, 9.0, p.y) * (1.0 - m)
+  float sd2 = length(sf) / max(0.020, foot*0.5);
+  col += vec3(0.86, 0.82, 0.92) * step(0.988, sh) * exp(-sd2*sd2*1.9)
+         * (0.30 + 0.70*hash21(sc+71.0)) * 0.95 * smoothstep(1.5, 8.0, p.y) * (1.0 - m)
          * (1.0 + 3.2*clamp(bh*0.5, 0.0, 1.0));
 
   /* filaments hauled forward burn hotter, and the crest goes cold-white */
   float g = clamp(bh*0.48, 0.0, 1.0);
-  col *= 1.0 + g*1.75;
-  col += mix(vec3(1.0, 0.16, 0.26), vec3(0.70, 0.83, 1.0), smoothstep(0.55, 1.0, g)) * g*g * 0.90;
+  col *= 1.0 + g*1.25;
+  col += mix(vec3(1.0, 0.18, 0.30), vec3(0.92, 0.42, 0.66), smoothstep(0.60, 1.0, g)) * g*g * 0.48;
   return col;
 }
 
-/* ---------------- the plain in front of it ---------------- */
-vec3 ground(vec3 pos, vec3 rd, float foot){
-  const float P = 0.30, R = 0.30;
-  float z = max(pos.z, 0.0);
-  vec2 g  = vec2(pos.x/P, z/R);
-  float aa = max(foot/min(P,R), 0.0010);
-  vec2 gi = floor(g);
-  vec2 gf = fract(g) - 0.5;
+/* re-aim the sample along the ray so the displaced surface still lines up */
+vec3 wallSample(vec3 p, vec3 dir, float foot, float ca){
+  vec2 par = dir.xy / dir.z;
+  par *= min(1.0, 2.2/max(length(par), 1e-3));
 
-  /* plates are laid by hand, not stamped: jitter position and size per cell */
-  vec2 off = (vec2(hash21(gi+3.0), hash21(gi+11.0)) - 0.5) * 0.17;
-  float rr = 0.120 + 0.085*hash21(gi + 27.0);
-  float d  = length((gf - off)*vec2(1.0, 0.88));
-  float m  = clamp((rr - d)/aa + 0.5, 0.0, 1.0);
-  m = mix(m, PI*rr*rr/0.88, smoothstep(0.30, 1.00, aa));
-
-  /* the plate mirrors the barrier — reflect the view ray and read what it lands on */
-  vec3 refl = vec3(0.0);
-  vec3 mr = vec3(rd.x, -rd.y, rd.z);
-  if (mr.z < -1e-4){
-    float tr = -pos.z/mr.z;
-    if (tr > 0.0){
-      float ci = floor((pos.x + tr*mr.x)/P);
-      float wy = tr*mr.y;
-      for (int q = -1; q <= 1; q++){
-        Col rc = column(ci + float(q), wy);
-        refl += rc.c * rc.b;
-      }
-      refl *= 0.333;
-    }
+  /* pins, not cloth: snap the displacement to the filament grid up close */
+  const vec2 PIN = vec2(0.30, 0.285);
+  float qm = smoothstep(0.32, 0.05, foot);
+  vec2 wp = p.xy;
+  float bh = 0.0;
+  for (int it = 0; it < 2; it++){
+    vec2 qp = (floor(wp/PIN) + 0.5) * PIN;
+    bh = breachH(mix(wp, qp, qm));
+    wp = p.xy + par*bh;
   }
-
-  Col c = column(gi.x, -z*0.9 + 3.0);
-  float swell  = 0.60 + 0.40*sin(z*0.80 - uT*0.65 + gi.x*0.045);
-  float mottle = 0.50 + 0.50*vnoise(pos.x*0.105 + z*0.06 + uT*0.02);
-  float fade   = exp(-z*0.108);
-
-  /* not every plate still fires */
-  float live = (0.30 + 0.70*hash21(gi + 53.0)) * step(0.11, hash21(gi + 91.0));
-  live *= 0.75 + 0.25*sin(uT*(0.6 + 1.8*hash21(gi + 7.0)) + hash21(gi)*6.3);
-
-  vec3 col = (refl*0.66 + c.c*c.b*0.44) * m * fade * swell * mottle * live;
-  col += c.c * c.b * 0.055 * exp(-z*0.75);
-  col += refl * 0.045 * exp(-z*0.40);
-  return col;
+  return wall(wp, foot, ca, bh);
 }
 
-/* filmic rolloff — highlights bleach to white instead of clipping to neon */
-vec3 aces(vec3 x){
-  const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
-  return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+/* ---------------- everything the ray meets, front to back ---------------- */
+vec3 barrier(vec3 o, vec3 d, float travel, float px, float radial, out float path){
+  vec3 acc = vec3(0.0);
+  path = travel + 400.0;
+  if (d.z >= -1e-4) return acc;
+
+  /* the barrier. there is only one of it — anything standing behind it
+     reads as a second wall and kills the depth rather than making it. */
+  float t1 = -o.z/d.z;
+  if (t1 > 0.0){
+    vec3 p1 = o + d*t1;
+    /* defocus grows toward the vanishing edge, like a long lens wide open */
+    float f1 = (travel + t1)*px/max(abs(d.z), 0.02) * (1.0 + 1.30*radial*radial);
+    acc += wallSample(p1, d, f1, 0.45 + 1.15*radial)
+           * exp(-(travel + t1)*0.0135);
+    path = travel + t1;
+  }
+  return acc;
+}
+
+/* ---------------- the plain in front of it ----------------
+   a field of loose data, denser toward the barrier, sitting on something
+   polished enough to hand the whole wall back at a grazing angle.      */
+vec3 plain(vec3 pos, vec3 rd, float travel, float px, float radial, out float path){
+  float z = max(pos.z, 0.0);
+  const float PX = 0.30, PZ = 0.62;
+
+  float foot = travel*px/max(abs(rd.y), 0.02);
+  float aa = max(foot/PX, 0.0012);
+
+  /* --- the polished sheen: reflect the ray and read the barrier back --- */
+  float wob = (vnoise(z*0.34 + uT*0.075) - 0.5) * 0.90
+            + (vnoise(z*1.15 - uT*0.130) - 0.5) * 0.28;
+  vec3 mo = vec3(pos.x + wob*(0.22 + z*0.028), 0.0, pos.z);
+  vec3 mr = normalize(vec3(rd.x, -rd.y, rd.z));
+  float rough = 0.7 + 3.6*smoothstep(0.0, 24.0, z);
+  float rp;
+  vec3 refl = barrier(mo, mr, travel, px*rough, radial, rp);
+
+  float cosI = clamp(abs(rd.y), 0.0, 1.0);
+  float F = 0.05 + 0.42*pow(1.0 - cosI, 3.2);
+
+  vec3 col = refl * F;
+
+  /* --- the loose data lying on it ---
+     one row of points per conduit, running away from the barrier. this is
+     the floor of the place: discrete, unevenly lit, mostly dark between. */
+  vec2 g  = vec2(pos.x/PX, z/PZ);
+  vec2 gi = floor(g), gf = fract(g) - 0.5;
+
+  float h1 = hash21(gi + 3.0), h2 = hash21(gi + 17.0);
+  float h3 = hash21(gi + 53.0);
+
+  /* points sit close to the centre of their cell — the rows have to stay
+     legible as rows all the way to the vanishing point */
+  vec2 off = vec2(h1 - 0.5, h2 - 0.5) * vec2(0.20, 0.44);
+  float rad = 0.052 + 0.040*h3;
+  float sd = length((gf - off) * vec2(1.0, PZ/PX)) - rad;
+  float m = clamp(-sd/aa + 0.5, 0.0, 1.0);
+  m = mix(m, PI*rad*rad*(PX/PZ), smoothstep(0.35, 1.10, aa));
+
+  /* they take their colour from the conduit above them, so the field reads
+     as spill off the barrier rather than as decoration */
+  Col c = column(gi.x, -z*0.9 + 3.0);
+
+  float live = step(0.26, hash21(gi + 7.0));
+  live *= 0.55 + 0.45*sin(uT*(0.5 + 2.2*h3) + h1*6.28);
+  float dens = exp(-z*0.052) * (0.50 + 0.50*vnoise(pos.x*0.09 + z*0.05 + uT*0.02));
+
+  col += c.c * c.b * m * live * dens * 1.45;
+  /* each point sits in its own small pool of light */
+  col += c.c * c.b * live * dens * 0.055 * exp(-max(sd, 0.0)*11.0);
+
+  path = travel * 1.7;
+  return col * exp(-travel*0.0135);
 }
 
 void main(){
   vec2 frag = gl_FragCoord.xy;
   vec2 uv = (frag - 0.5*uRes) / uRes.y;
-
-  /* transport tear — rare, small */
-  float bandH = 6.0 + 30.0*hash11(floor(uT*1.6));
-  float band  = floor(frag.y / bandH);
-  float slice = floor(uT*8.0);
-  float hit   = step(0.9976 - 0.03*uPulse - 0.30*breachEnv(), hash21(vec2(band, slice)));
-  uv.x += hit * (hash21(vec2(band*3.7, slice))-0.5) * 0.020 * (1.0-uCalm);
 
   /* camera: on the plain, oblique to the barrier, handheld */
   float sl = 1.0 - 0.6*uCalm;
@@ -307,58 +372,118 @@ void main(){
   float px = 1.0/(uRes.y*FOCAL);
   float radial = length(uv);
 
-  float tW = 1e9, tF = 1e9;
-  if (rd.z < -1e-4){ float t = -ro.z/rd.z; if (t > 0.0) tW = t; }
+  float tF = 1e9;
   if (rd.y < -1e-4){ float t = -ro.y/rd.y; if (t > 0.0) tF = t; }
+  float tW = 1e9;
+  if (rd.z < -1e-4){ float t = -ro.z/rd.z; if (t > 0.0) tW = t; }
 
-  vec3 col = vec3(0.0);
-  float t = 1e9;
-
+  vec3 col; float path;
   if (tF < tW){
-    vec3 p = ro + rd*tF;
-    col = ground(p, rd, tF*px/max(abs(rd.y), 0.02));
-    t = tF;
-  } else if (tW < 1e8){
-    vec3 p = ro + rd*tW;
-    /* defocus grows toward the vanishing edge, like a long lens wide open */
-    float foot = tW*px/max(abs(rd.z), 0.02) * (1.0 + 1.30*radial*radial);
-    /* the surface now sits at z = h, so re-aim the sample along the ray.
-       shear is capped so grazing rays don't smear into liquid */
-    vec2 par = rd.xy / rd.z;
-    par *= min(1.0, 2.2/max(length(par), 1e-3));
-
-    /* pins, not cloth: snap the displacement to the filament grid up close */
-    const vec2 PIN = vec2(0.30, 0.285);
-    float qm = smoothstep(0.32, 0.05, foot);
-    vec2 wp = p.xy;
-    float bh = 0.0;
-    for (int it = 0; it < 2; it++){
-      vec2 qp = (floor(wp/PIN) + 0.5) * PIN;
-      bh = breachH(mix(wp, qp, qm));
-      wp = p.xy + par*bh;
-    }
-    col = wall(wp, foot, 0.45 + 1.15*radial, bh);
-    t = tW;
+    col = plain(ro + rd*tF, rd, tF, px, radial, path);
   } else {
-    col = vec3(0.0008, 0.0004, 0.0012);
-    t = 400.0;
+    col = barrier(ro, rd, 0.0, px, radial, path);
+    col += vec3(0.0008, 0.0004, 0.0012);   /* the void is not quite black */
   }
 
-  /* atmosphere: the air in front of it is not empty */
-  col *= exp(-t*0.0135);
-  col += vec3(0.0078, 0.0007, 0.0027) * (1.0 - exp(-t*0.052));
+  /* the air in front of it is not quite empty — but the void behind the
+     conduits has to stay black, so this stays almost nothing */
+  col += vec3(0.0026, 0.0003, 0.0011) * (1.0 - exp(-path*0.050));
 
-  /* ---- grade ---- */
   col *= (1.0 + uPulse*0.35) * (0.97 + 0.03*vnoise(uT*0.6));
+
+  col = max(col, 0.0);
+  O = vec4(uHdr > 0.5 ? col : sqrt(clamp(col*0.125, 0.0, 1.0)), 1.0);
+}`;
+
+/* ------------------------------------------------- bright pass / downsample */
+const FRAG_BRIGHT = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform sampler2D uTex;
+uniform vec2  uTexel;
+uniform float uThresh;
+uniform float uHdr;
+void main(){
+  vec2 uv = gl_FragCoord.xy * 2.0 * uTexel;
+  vec3 s = texture(uTex, uv + uTexel*vec2(-0.5,-0.5)).rgb
+         + texture(uTex, uv + uTexel*vec2( 0.5,-0.5)).rgb
+         + texture(uTex, uv + uTexel*vec2(-0.5, 0.5)).rgb
+         + texture(uTex, uv + uTexel*vec2( 0.5, 0.5)).rgb;
+  s *= 0.25;
+  vec3 c = uHdr > 0.5 ? s : s*s*8.0;
+  float l = max(max(c.r, c.g), c.b);
+  c *= max(l - uThresh, 0.0) / max(l, 1e-4);
+  O = vec4(uHdr > 0.5 ? c : sqrt(clamp(c*0.125, 0.0, 1.0)), 1.0);
+}`;
+
+/* ------------------------------------------------- separable streak
+   run horizontally several times with a growing stride: the reach ends up
+   enormous for nine taps a pass, which is what an anamorphic flare needs. */
+const FRAG_BLUR = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform sampler2D uTex;
+uniform vec2  uTexel;
+uniform vec2  uDir;
+uniform float uStride;
+void main(){
+  vec2 uv = gl_FragCoord.xy * uTexel;
+  vec3 s = vec3(0.0); float wsum = 0.0;
+  for (int i = -4; i <= 4; i++){
+    float fi = float(i);
+    float w = exp(-fi*fi*0.20);
+    s += texture(uTex, uv + uDir*uTexel*(fi*uStride)).rgb * w;
+    wsum += w;
+  }
+  O = vec4(s/wsum, 1.0);
+}`;
+
+/* ------------------------------------------------- composite + grade */
+const FRAG_COMP = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform sampler2D uScene;
+uniform sampler2D uBloomTex;
+uniform vec2  uRes;
+uniform float uT;
+uniform float uEnter;
+uniform float uBloomAmt;
+uniform float uHdr;
+
+#define PI 3.141592653589793
+float hash21(vec2 p){ vec3 q = fract(vec3(p.xyx)*vec3(0.1031,0.1030,0.0973));
+                      q += dot(q, q.yzx+33.33); return fract((q.x+q.y)*q.z); }
+vec3 dec(vec3 c, float hdr){ return hdr > 0.5 ? c : c*c*8.0; }
+
+/* filmic rolloff — highlights bleach to white instead of clipping to neon */
+vec3 aces(vec3 x){
+  const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+  return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+}
+
+void main(){
+  vec2 frag = gl_FragCoord.xy;
+  vec2 q = frag/uRes;
+  vec2 dv = q - 0.5;
+  float ca = 0.0014 + 0.0090*dot(dv, dv);
+
+  vec3 c;
+  c.r = dec(texture(uScene, q + dv*ca).rgb, uHdr).r;
+  c.g = dec(texture(uScene, q          ).rgb, uHdr).g;
+  c.b = dec(texture(uScene, q - dv*ca).rgb, uHdr).b;
+
+  vec3 b = dec(texture(uBloomTex, q).rgb, uHdr);
+
+  vec3 col = c + b * uBloomAmt * vec3(1.00, 0.88, 0.94);
+
   col = aces(col * 0.92);
   col = pow(col, vec3(1.0/2.2));
 
   float lum = dot(col, vec3(0.299, 0.587, 0.114));
-  col = mix(vec3(lum), col, 1.05);
+  col = mix(vec3(lum), col, 1.07);
 
   col *= 0.975 + 0.025*sin(frag.y*PI + uT*1.7);
   col += (hash21(frag + fract(uT)*vec2(97.1, 31.7)) - 0.5) * 0.028;
-  vec2 q = frag/uRes;
   col *= 0.52 + 0.48*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.22);
 
   col *= uEnter;
@@ -374,35 +499,59 @@ function compile(type, src){
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
   return s;
 }
-const prog = gl.createProgram();
-gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
-gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
-gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); return; }
-gl.useProgram(prog);
+function makeProgram(frag, names){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); return null; }
+  const u = {};
+  for (const n of names) u[n] = gl.getUniformLocation(p, n);
+  return { p, u };
+}
+
+const P = {
+  scene:  makeProgram(FRAG_SCENE,  ["uRes","uT","uPulse","uCalm","uBT","uBP","uHdr"]),
+  bright: makeProgram(FRAG_BRIGHT, ["uTex","uTexel","uThresh","uHdr"]),
+  blur:   makeProgram(FRAG_BLUR,   ["uTex","uTexel","uDir","uStride"]),
+  comp:   makeProgram(FRAG_COMP,   ["uScene","uBloomTex","uRes","uT","uEnter","uBloomAmt","uHdr"])
+};
+if (!P.scene || !P.bright || !P.blur || !P.comp) return;
 gl.bindVertexArray(gl.createVertexArray());
 
-const U = {
-  res:   gl.getUniformLocation(prog, "uRes"),
-  t:     gl.getUniformLocation(prog, "uT"),
-  pulse: gl.getUniformLocation(prog, "uPulse"),
-  enter: gl.getUniformLocation(prog, "uEnter"),
-  calm:  gl.getUniformLocation(prog, "uCalm"),
-  bt:    gl.getUniformLocation(prog, "uBT"),
-  bp:    gl.getUniformLocation(prog, "uBP")
-};
-gl.uniform1f(U.calm, CALM);
+const INTERNAL = HDR ? gl.RGBA16F : gl.RGBA8;
+const TYPE     = HDR ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+
+function makeTarget(w, h){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, INTERNAL, w, h, 0, gl.RGBA, TYPE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex, fb, w, h };
+}
+function dropTarget(t){ if (t){ gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); } }
+
+const T = { scene:null, a:null, b:null };
 
 function resize(){
   const cap = window.innerWidth < 800 ? 1.15 : 1.35;
   const dpr = Math.min(window.devicePixelRatio || 1, cap);
   const w = Math.max(2, Math.floor(innerWidth * dpr));
   const h = Math.max(2, Math.floor(innerHeight * dpr));
-  if (cvs.width !== w || cvs.height !== h){
-    cvs.width = w; cvs.height = h;
-    gl.viewport(0, 0, w, h);
-    gl.uniform2f(U.res, w, h);
-  }
+  if (cvs.width === w && cvs.height === h && T.scene) return;
+  cvs.width = w; cvs.height = h;
+  dropTarget(T.scene); dropTarget(T.a); dropTarget(T.b);
+  const hw = Math.max(2, w >> 1), hh = Math.max(2, h >> 1);
+  T.scene = makeTarget(w, h);
+  T.a = makeTarget(hw, hh);
+  T.b = makeTarget(hw, hh);
 }
 resize();
 addEventListener("resize", resize, { passive:true });
@@ -416,25 +565,81 @@ function triggerBreach(){
   breachT = clockT;
   breachX = -7.0 + Math.random()*11.0;
   breachY =  3.2 + Math.random()*7.5;
-  gl.uniform2f(U.bp, breachX, breachY);
   if (audioReady && AC && AC.state === "running") pressure();
-  strike(1.3);
+  strike(0.45);
 }
 function scheduleBreach(){
-  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 70000 + Math.random()*110000);
+  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 95000 + Math.random()*125000);
 }
-setTimeout(() => { triggerBreach(); scheduleBreach(); }, 26000 + Math.random()*22000);
+setTimeout(() => { triggerBreach(); scheduleBreach(); }, 34000 + Math.random()*34000);
+
+/* a soft halo, not a flare: enough spread to make the conduits read as
+   emitters, short enough that nothing smears across the frame */
+const STREAK = [[1,0,1.0], [0,1,1.0], [1,0,3.0], [0,1,2.2]];
 
 function frame(now){
   if (!running) return;
   clockT = (now - t0) / 1000;
   pulse *= 0.945;
   enter += (1.0 - enter) * 0.0075;
-  gl.uniform1f(U.t, clockT);
-  gl.uniform1f(U.pulse, pulse);
-  gl.uniform1f(U.enter, enter);
-  gl.uniform1f(U.bt, clockT - breachT);
+
+  /* --- scene --- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.scene.fb);
+  gl.viewport(0, 0, T.scene.w, T.scene.h);
+  gl.useProgram(P.scene.p);
+  gl.uniform2f(P.scene.u.uRes, T.scene.w, T.scene.h);
+  gl.uniform1f(P.scene.u.uT, clockT);
+  gl.uniform1f(P.scene.u.uPulse, pulse);
+  gl.uniform1f(P.scene.u.uCalm, CALM);
+  gl.uniform1f(P.scene.u.uBT, clockT - breachT);
+  gl.uniform2f(P.scene.u.uBP, breachX, breachY);
+  gl.uniform1f(P.scene.u.uHdr, HDR ? 1 : 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  /* --- bright pass --- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.a.fb);
+  gl.viewport(0, 0, T.a.w, T.a.h);
+  gl.useProgram(P.bright.p);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, T.scene.tex);
+  gl.uniform1i(P.bright.u.uTex, 0);
+  gl.uniform2f(P.bright.u.uTexel, 1/T.scene.w, 1/T.scene.h);
+  gl.uniform1f(P.bright.u.uThresh, 0.95);
+  gl.uniform1f(P.bright.u.uHdr, HDR ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  /* --- streaks --- */
+  gl.useProgram(P.blur.p);
+  gl.uniform1i(P.blur.u.uTex, 0);
+  let src = T.a, dst = T.b;
+  for (let i = 0; i < STREAK.length; i++){
+    const s = STREAK[i];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
+    gl.viewport(0, 0, dst.w, dst.h);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    gl.uniform2f(P.blur.u.uTexel, 1/src.w, 1/src.h);
+    gl.uniform2f(P.blur.u.uDir, s[0], s[1]);
+    gl.uniform1f(P.blur.u.uStride, s[2]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const sw = src; src = dst; dst = sw;
+  }
+
+  /* --- composite --- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, cvs.width, cvs.height);
+  gl.useProgram(P.comp.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.scene.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, src.tex);
+  gl.uniform1i(P.comp.u.uScene, 0);
+  gl.uniform1i(P.comp.u.uBloomTex, 1);
+  gl.uniform2f(P.comp.u.uRes, cvs.width, cvs.height);
+  gl.uniform1f(P.comp.u.uT, clockT);
+  gl.uniform1f(P.comp.u.uEnter, enter);
+  gl.uniform1f(P.comp.u.uBloomAmt, 0.32 + 0.30*pulse);
+  gl.uniform1f(P.comp.u.uHdr, HDR ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
@@ -591,21 +796,21 @@ function pressure(){
   const s = AC.createBufferSource(); s.buffer = noiseBuf(8); s.loop = true;
   const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.2;
   f.frequency.setValueAtTime(340, AC.currentTime);
-  f.frequency.exponentialRampToValueAtTime(85, AC.currentTime + 6.0);
+  f.frequency.exponentialRampToValueAtTime(85, AC.currentTime + 10.0);
   const g = AC.createGain(); g.gain.value = 0.0001;
-  g.gain.exponentialRampToValueAtTime(0.42, AC.currentTime + 2.2);
-  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 7.0);
+  g.gain.exponentialRampToValueAtTime(0.42, AC.currentTime + 3.5);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 15.5);
 
   const sub = AC.createOscillator(); sub.type = "sine"; sub.frequency.value = 33.0;
   const sg = AC.createGain(); sg.gain.value = 0.0001;
-  sg.gain.exponentialRampToValueAtTime(0.16, AC.currentTime + 2.4);
-  sg.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 7.0);
+  sg.gain.exponentialRampToValueAtTime(0.16, AC.currentTime + 4.0);
+  sg.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 15.5);
 
   s.connect(f); f.connect(g); g.connect(bus);
   sub.connect(sg); sg.connect(bus);
-  s.start(); s.stop(AC.currentTime + 7.2);
-  sub.start(); sub.stop(AC.currentTime + 7.2);
-  strike(0.85);
+  s.start(); s.stop(AC.currentTime + 15.9);
+  sub.start(); sub.stop(AC.currentTime + 15.9);
+  strike(0.30);
 }
 
 /* the structure settling — a dull knock, unpitched */
