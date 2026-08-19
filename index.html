@@ -55,6 +55,8 @@ uniform float uT;
 uniform float uPulse;
 uniform float uEnter;
 uniform float uCalm;
+uniform float uBT;      // seconds since the current breach began
+uniform vec2  uBP;      // where on the barrier it is pressing
 
 #define PI 3.141592653589793
 
@@ -113,8 +115,62 @@ Col column(float i, float v){
   Col r; r.c = col; r.b = bri; r.w = w; return r;
 }
 
+/* ---------------- something pressing from the far side ----------------
+   the barrier behaves like a pin board: each filament can only travel
+   toward the viewer, so a body leaning on the back of it shows up as a
+   dome, an expanding shock ring and a train of standing ripples.       */
+float n2(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0-2.0*f);
+  return mix(mix(hash21(i), hash21(i+vec2(1.0,0.0)), f.x),
+             mix(hash21(i+vec2(0.0,1.0)), hash21(i+vec2(1.0,1.0)), f.x), f.y);
+}
+float fbm2(vec2 p){
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++){ s += a*n2(p); p = p*2.07 + 7.1; a *= 0.5; }
+  return s;
+}
+float breachEnv(){
+  if (uBT < 0.0 || uBT > 10.0) return 0.0;
+  return smoothstep(0.0, 0.20, uBT) * exp(-max(uBT-0.20, 0.0)*0.60);
+}
+float breachH(vec2 p){
+  float env = breachEnv();
+  if (env <= 0.0005) return 0.0;
+  float sd = uBP.x*3.1 + uBP.y*7.7;
+  vec2 q = (p - uBP) * vec2(1.0, 1.10);
+
+  /* domain warp: whatever is behind this has no shape worth naming */
+  vec2 w1 = vec2(fbm2(q*0.23 + sd), fbm2(q*0.23 + sd + 47.9)) - 0.5;
+  q += w1 * 7.0;
+  vec2 w2 = vec2(fbm2(q*0.55 + uBT*0.30), fbm2(q*0.55 + 91.0 - uBT*0.24)) - 0.5;
+  q += w2 * 3.0;
+
+  float r = length(q);
+
+  /* several limbs push at once, none of them centred on anything */
+  float h = 0.0;
+  for (int k = 0; k < 4; k++){
+    float fk = float(k);
+    vec2 o = (vec2(hash11(fk*13.7 + sd), hash11(fk*29.3 + sd + 5.0)) - 0.5) * 9.0;
+    float s = 0.55 + 1.30*hash11(fk*7.7 + sd + 3.0);
+    vec2 an = vec2(1.0 + 0.9*hash11(fk*5.1 + sd), 1.0 - 0.45*hash11(fk*11.3 + sd));
+    float rk = length((q - o)*an);
+    h += exp(-rk*rk*0.075/s) * (0.40 + 0.75*hash11(fk*3.3 + sd));
+  }
+
+  float grain = fbm2(q*0.42 + 21.0);
+  float front = uBT*3.0;
+  float ring   = exp(-pow(r - front, 2.0)*0.26) * 0.85 * (0.35 + 1.20*grain);
+  float ripple = cos(r*2.10 - uBT*7.0 + grain*7.0) * exp(-r*r*0.030) * 0.38;
+
+  /* frayed edge — it tears through rather than bulging out */
+  float mask = smoothstep(0.16, 0.68, grain*0.85 + 0.42);
+  return (h*mask + ring + ripple) * env * 1.75;
+}
+
 /* ---------------- barrier surface ---------------- */
-vec3 wall(vec2 p, float foot, float ca){
+vec3 wall(vec2 p, float foot, float ca, float bh){
   const float P = 0.30;
   float fu = p.x / P;
   float aa = max(foot / P, 0.0006);
@@ -159,7 +215,13 @@ vec3 wall(vec2 p, float foot, float ca){
   vec2  sf = (fract(p*1.55) - vec2(hash21(sc+13.0), hash21(sc+29.0))) / 1.55;
   float sd = length(sf) / max(0.022, foot*0.5);
   col += vec3(0.72, 0.67, 0.78) * step(0.9935, sh) * exp(-sd*sd*1.9)
-         * (0.30 + 0.70*hash21(sc+71.0)) * 0.60 * smoothstep(2.0, 9.0, p.y) * (1.0 - m);
+         * (0.30 + 0.70*hash21(sc+71.0)) * 0.60 * smoothstep(2.0, 9.0, p.y) * (1.0 - m)
+         * (1.0 + 3.2*clamp(bh*0.5, 0.0, 1.0));
+
+  /* filaments hauled forward burn hotter, and the crest goes cold-white */
+  float g = clamp(bh*0.48, 0.0, 1.0);
+  col *= 1.0 + g*1.75;
+  col += mix(vec3(1.0, 0.16, 0.26), vec3(0.70, 0.83, 1.0), smoothstep(0.55, 1.0, g)) * g*g * 0.90;
   return col;
 }
 
@@ -224,7 +286,7 @@ void main(){
   float bandH = 6.0 + 30.0*hash11(floor(uT*1.6));
   float band  = floor(frag.y / bandH);
   float slice = floor(uT*8.0);
-  float hit   = step(0.9976 - 0.03*uPulse, hash21(vec2(band, slice)));
+  float hit   = step(0.9976 - 0.03*uPulse - 0.30*breachEnv(), hash21(vec2(band, slice)));
   uv.x += hit * (hash21(vec2(band*3.7, slice))-0.5) * 0.020 * (1.0-uCalm);
 
   /* camera: on the plain, oblique to the barrier, handheld */
@@ -260,7 +322,22 @@ void main(){
     vec3 p = ro + rd*tW;
     /* defocus grows toward the vanishing edge, like a long lens wide open */
     float foot = tW*px/max(abs(rd.z), 0.02) * (1.0 + 1.30*radial*radial);
-    col = wall(p.xy, foot, 0.45 + 1.15*radial);
+    /* the surface now sits at z = h, so re-aim the sample along the ray.
+       shear is capped so grazing rays don't smear into liquid */
+    vec2 par = rd.xy / rd.z;
+    par *= min(1.0, 2.2/max(length(par), 1e-3));
+
+    /* pins, not cloth: snap the displacement to the filament grid up close */
+    const vec2 PIN = vec2(0.30, 0.285);
+    float qm = smoothstep(0.32, 0.05, foot);
+    vec2 wp = p.xy;
+    float bh = 0.0;
+    for (int it = 0; it < 2; it++){
+      vec2 qp = (floor(wp/PIN) + 0.5) * PIN;
+      bh = breachH(mix(wp, qp, qm));
+      wp = p.xy + par*bh;
+    }
+    col = wall(wp, foot, 0.45 + 1.15*radial, bh);
     t = tW;
   } else {
     col = vec3(0.0008, 0.0004, 0.0012);
@@ -310,7 +387,9 @@ const U = {
   t:     gl.getUniformLocation(prog, "uT"),
   pulse: gl.getUniformLocation(prog, "uPulse"),
   enter: gl.getUniformLocation(prog, "uEnter"),
-  calm:  gl.getUniformLocation(prog, "uCalm")
+  calm:  gl.getUniformLocation(prog, "uCalm"),
+  bt:    gl.getUniformLocation(prog, "uBT"),
+  bp:    gl.getUniformLocation(prog, "uBP")
 };
 gl.uniform1f(U.calm, CALM);
 
@@ -329,7 +408,22 @@ resize();
 addEventListener("resize", resize, { passive:true });
 
 let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = true;
+let breachT = -1e4, breachX = 0.0, breachY = 7.0;
 function strike(a){ pulse = Math.min(1.3, pulse + a); }
+
+/* rare, and worth waiting for */
+function triggerBreach(){
+  breachT = clockT;
+  breachX = -7.0 + Math.random()*11.0;
+  breachY =  3.2 + Math.random()*7.5;
+  gl.uniform2f(U.bp, breachX, breachY);
+  if (audioReady && AC && AC.state === "running") pressure();
+  strike(1.3);
+}
+function scheduleBreach(){
+  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 70000 + Math.random()*110000);
+}
+setTimeout(() => { triggerBreach(); scheduleBreach(); }, 26000 + Math.random()*22000);
 
 function frame(now){
   if (!running) return;
@@ -339,6 +433,7 @@ function frame(now){
   gl.uniform1f(U.t, clockT);
   gl.uniform1f(U.pulse, pulse);
   gl.uniform1f(U.enter, enter);
+  gl.uniform1f(U.bt, clockT - breachT);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
@@ -390,101 +485,124 @@ function panned(node){
 function buildAudio(){
   master = AC.createGain(); master.gain.value = 0.0001;
   const comp = AC.createDynamicsCompressor();
-  comp.threshold.value = -20; comp.ratio.value = 6; comp.knee.value = 12;
+  comp.threshold.value = -22; comp.ratio.value = 6; comp.knee.value = 14;
   master.connect(comp); comp.connect(AC.destination);
 
-  const conv = AC.createConvolver(); conv.buffer = impulse(6.0, 2.4);
-  const wet = AC.createGain(); wet.gain.value = 0.60;
-  const dry = AC.createGain(); dry.gain.value = 0.85;
-  conv.connect(wet); wet.connect(master); dry.connect(master);
-  bus = AC.createGain(); bus.connect(dry); bus.connect(conv);
+  /* everything runs through a blanket: no top end escapes */
+  const dull = AC.createBiquadFilter();
+  dull.type = "lowpass"; dull.frequency.value = 780; dull.Q.value = 0.35;
+  const floorCut = AC.createBiquadFilter();
+  floorCut.type = "highpass"; floorCut.frequency.value = 30; floorCut.Q.value = 0.5;
+  const tilt = AC.createBiquadFilter();
+  tilt.type = "highshelf"; tilt.frequency.value = 900; tilt.gain.value = -14;
+  dull.connect(floorCut); floorCut.connect(tilt);
 
-  /* the slab itself */
+  const conv = AC.createConvolver(); conv.buffer = impulse(6.5, 2.2);
+  const wet = AC.createGain(); wet.gain.value = 0.55;
+  const dry = AC.createGain(); dry.gain.value = 0.85;
+  tilt.connect(conv); conv.connect(wet); wet.connect(master);
+  tilt.connect(dry); dry.connect(master);
+  bus = AC.createGain(); bus.connect(dull);
+
+  /* the slab: inharmonic, no interval anyone could name */
   const df = AC.createBiquadFilter();
-  df.type = "lowpass"; df.frequency.value = 230; df.Q.value = 0.7;
+  df.type = "lowpass"; df.frequency.value = 200; df.Q.value = 0.6;
   df.connect(bus);
-  lfo(0.019, 85, df.frequency, 230);
-  [36.71, 43.65, 55.00, 73.42, 36.86].forEach((f, i) => {
+  lfo(0.017, 45, df.frequency, 200);
+  [31.70, 38.90, 47.30, 62.10, 31.94].forEach((f, i) => {
     const o = AC.createOscillator();
-    o.type = i % 2 ? "triangle" : "sine";
+    o.type = "sine";
     o.frequency.value = f;
-    const g = AC.createGain(); g.gain.value = [0.34,0.20,0.16,0.09,0.22][i];
-    lfo(0.013 + i*0.007, 0.055, g.gain, g.gain.value);
-    lfo(0.030 + i*0.011, 0.35, o.detune, 0);
+    const g = AC.createGain(); g.gain.value = [0.20,0.16,0.13,0.08,0.12][i];
+    lfo(0.011 + i*0.006, 0.045, g.gain, g.gain.value);
+    lfo(0.024 + i*0.009, 0.30, o.detune, 0);
     o.connect(g); g.connect(df); o.start();
   });
 
-  /* pressure from the far side */
-  const nz = AC.createBufferSource(); nz.buffer = noiseBuf(6); nz.loop = true;
-  const bp = AC.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 1.1;
+  /* pressure from the far side — low and formless, no rush of air */
+  const nz = AC.createBufferSource(); nz.buffer = noiseBuf(8); nz.loop = true;
+  const lp = AC.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.5;
   const ng = AC.createGain();
-  nz.connect(bp); bp.connect(ng); ng.connect(bus); nz.start();
-  lfo(0.035, 360, bp.frequency, 500);
-  lfo(0.011, 0.040, ng.gain, 0.100);
+  nz.connect(lp); lp.connect(ng); ng.connect(bus); nz.start();
+  lfo(0.023, 110, lp.frequency, 300);
+  lfo(0.009, 0.018, ng.gain, 0.042);
 
-  /* ICE hum */
-  const hf = AC.createBiquadFilter(); hf.type = "lowpass"; hf.frequency.value = 1050; hf.Q.value = 3.0;
+  /* ICE hum — muffled, inharmonic */
+  const hf = AC.createBiquadFilter(); hf.type = "lowpass"; hf.frequency.value = 430; hf.Q.value = 1.4;
   const hg = AC.createGain();
   hf.connect(hg); hg.connect(bus);
-  [220.5, 293.66, 440.9].forEach((f, i) => {
-    const o = AC.createOscillator(); o.type = "sawtooth"; o.frequency.value = f;
-    const g = AC.createGain(); g.gain.value = [0.5,0.3,0.16][i];
-    lfo(0.09 + i*0.05, 6.0, o.detune, 0);
+  [167.0, 244.5, 359.0].forEach((f, i) => {
+    const o = AC.createOscillator(); o.type = "triangle"; o.frequency.value = f;
+    const g = AC.createGain(); g.gain.value = [0.5,0.26,0.12][i];
+    lfo(0.08 + i*0.045, 4.5, o.detune, 0);
     o.connect(g); g.connect(hf); o.start();
   });
-  lfo(0.07, 0.013, hg.gain, 0.024);
+  lfo(0.06, 0.012, hg.gain, 0.028);
 
   master.gain.setValueAtTime(0.0001, AC.currentTime);
-  master.gain.exponentialRampToValueAtTime(0.55, AC.currentTime + 12);
+  master.gain.exponentialRampToValueAtTime(0.78, AC.currentTime + 14);
   audioReady = true;
 }
 
-function ping(){
-  const scale = [146.83,174.61,220.00,261.63,293.66,349.23,440.00,587.33];
-  const f = scale[(Math.random()*scale.length)|0] * (Math.random() < 0.25 ? 2 : 1);
-  const o = AC.createOscillator(); o.type = Math.random() < 0.5 ? "sine" : "triangle";
-  o.frequency.value = f;
-  o.frequency.exponentialRampToValueAtTime(f*0.985, AC.currentTime + 3.0);
-  const g = AC.createGain(); g.gain.value = 0.0001;
-  g.gain.exponentialRampToValueAtTime(0.14, AC.currentTime + 0.012);
-  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 3.2);
-  o.connect(g); panned(g);
-  o.start(); o.stop(AC.currentTime + 3.4);
-  strike(0.6);
-}
+/* something almost forms a word, then doesn't */
 function whisper(){
-  const dur = 0.7 + Math.random()*1.1;
+  const dur = 0.8 + Math.random()*1.3;
   const s = AC.createBufferSource(); s.buffer = noiseBuf(2); s.loop = true;
-  const f1 = AC.createBiquadFilter(); f1.type = "bandpass"; f1.Q.value = 9;
-  f1.frequency.setValueAtTime(480 + Math.random()*420, AC.currentTime);
-  f1.frequency.linearRampToValueAtTime(1300 + Math.random()*1400, AC.currentTime + dur);
+  const f1 = AC.createBiquadFilter(); f1.type = "bandpass"; f1.Q.value = 5;
+  f1.frequency.setValueAtTime(320 + Math.random()*220, AC.currentTime);
+  f1.frequency.linearRampToValueAtTime(520 + Math.random()*520, AC.currentTime + dur);
   const g = AC.createGain(); g.gain.value = 0.0001;
-  g.gain.exponentialRampToValueAtTime(0.065, AC.currentTime + dur*0.35);
+  g.gain.exponentialRampToValueAtTime(0.075, AC.currentTime + dur*0.4);
   g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + dur);
   s.connect(f1); f1.connect(g); panned(g);
   s.start(); s.stop(AC.currentTime + dur + 0.1);
-  strike(0.30);
+  strike(0.28);
 }
-function groan(){
-  const o = AC.createOscillator(); o.type = "sawtooth";
-  o.frequency.setValueAtTime(62, AC.currentTime);
-  o.frequency.exponentialRampToValueAtTime(27, AC.currentTime + 5.5);
-  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 145; f.Q.value = 4;
+
+/* something leans on it: a swell of pressure, no pitch to follow */
+function pressure(){
+  const s = AC.createBufferSource(); s.buffer = noiseBuf(8); s.loop = true;
+  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.2;
+  f.frequency.setValueAtTime(340, AC.currentTime);
+  f.frequency.exponentialRampToValueAtTime(85, AC.currentTime + 6.0);
   const g = AC.createGain(); g.gain.value = 0.0001;
-  g.gain.exponentialRampToValueAtTime(0.26, AC.currentTime + 1.4);
-  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 6.0);
-  o.connect(f); f.connect(g); g.connect(bus);
-  o.start(); o.stop(AC.currentTime + 6.2);
-  strike(0.95);
+  g.gain.exponentialRampToValueAtTime(0.42, AC.currentTime + 2.2);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 7.0);
+
+  const sub = AC.createOscillator(); sub.type = "sine"; sub.frequency.value = 33.0;
+  const sg = AC.createGain(); sg.gain.value = 0.0001;
+  sg.gain.exponentialRampToValueAtTime(0.16, AC.currentTime + 2.4);
+  sg.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 7.0);
+
+  s.connect(f); f.connect(g); g.connect(bus);
+  sub.connect(sg); sg.connect(bus);
+  s.start(); s.stop(AC.currentTime + 7.2);
+  sub.start(); sub.stop(AC.currentTime + 7.2);
+  strike(0.85);
 }
+
+/* the structure settling — a dull knock, unpitched */
+function knock(){
+  const s = AC.createBufferSource(); s.buffer = noiseBuf(1); s.loop = true;
+  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 3.0;
+  f.frequency.setValueAtTime(240 + Math.random()*120, AC.currentTime);
+  f.frequency.exponentialRampToValueAtTime(70, AC.currentTime + 0.5);
+  const g = AC.createGain(); g.gain.value = 0.0001;
+  g.gain.exponentialRampToValueAtTime(0.30, AC.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 1.1);
+  s.connect(f); f.connect(g); panned(g);
+  s.start(); s.stop(AC.currentTime + 1.3);
+  strike(0.55);
+}
+
 function scheduleEvents(){
   setTimeout(() => {
     if (audioReady && AC.state === "running"){
       const r = Math.random();
-      if (r < 0.52) ping(); else if (r < 0.88) whisper(); else groan();
+      if (r < 0.62) whisper(); else knock();
     }
     scheduleEvents();
-  }, 5000 + Math.random()*14000);
+  }, 6000 + Math.random()*16000);
 }
 
 function bootAudio(){
