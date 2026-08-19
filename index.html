@@ -20,6 +20,60 @@
   .crt{position:fixed;inset:0;pointer-events:none;opacity:.11;
     background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.6) 3px,rgba(0,0,0,0) 4px)}
   @media (prefers-reduced-motion:reduce){.veil{animation:none}}
+
+  /* ================================================================
+     BOOT — a netrunner deck coming up. it is here so there is a gesture to
+     hang the audio on: user activation does not survive a navigation, so
+     the way in has to live in this document.
+     ================================================================ */
+  :root{
+    --red:#ff2a3c; --amber:#ffd447; --grn:#39ff88;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono","Noto Sans Mono CJK SC",monospace;
+  }
+  #boot{position:fixed;inset:0;z-index:10;background:#040103;color:var(--red);
+    font-family:var(--mono);overflow:hidden;cursor:text;
+    transition:opacity .5s ease,filter .5s ease}
+  #boot.gone{opacity:0;filter:brightness(2.4) saturate(.25);pointer-events:none}
+  #boot::after{content:"";position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(150% 120% at 50% 42%,rgba(0,0,0,0) 34%,rgba(0,0,0,.80) 100%)}
+
+  #term{position:absolute;inset:0;overflow-y:auto;
+    padding:22px 26px 30px;font-size:12.5px;line-height:1.5;
+    text-shadow:0 0 7px rgba(255,42,60,.26);
+    scrollbar-width:none;-ms-overflow-style:none}
+  #term::-webkit-scrollbar{display:none}
+  #log div,#promptline{white-space:pre-wrap;word-break:break-word}
+  #term i{font-style:normal}
+  .dim{color:rgba(255,42,60,.42)}
+  .ok{color:var(--grn)}
+  .wr{color:var(--amber)}
+  .cj{color:#ff6472}
+  .hd{color:#ffb9c0;letter-spacing:.06em}
+  .key{color:rgba(255,42,60,.55)}
+  .val{color:#ff8a95}
+
+  #promptline{margin-top:10px;visibility:hidden}
+  #promptline.on{visibility:visible}
+  #ps1{color:#ff6472}
+  #cur{background:var(--red);animation:blink 1.05s steps(1) infinite}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  #boot.busy #cur{animation:none}
+  /* real field, kept off-screen: it raises the on-screen keyboard on touch
+     and gives the browser something to hang an IME on */
+  #tin{position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0}
+
+  .tick{position:absolute;width:22px;height:22px;border:1px solid rgba(255,42,60,.45)}
+  .tick.tl{left:9px;top:9px;border-right:0;border-bottom:0}
+  .tick.tr{right:9px;top:9px;border-left:0;border-bottom:0}
+
+  .bscan{position:absolute;inset:0;pointer-events:none;opacity:.4;
+    background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.5) 3px,rgba(0,0,0,0) 4px)}
+
+  @media (max-width:720px){ #term{font-size:10.5px;padding:14px 14px 22px} }
+  @media (prefers-reduced-motion:reduce){
+    #cur{animation:none}
+    #boot{transition:opacity .3s}
+  }
 </style>
 </head>
 <body>
@@ -27,9 +81,281 @@
 <div class="veil"></div>
 <div class="crt"></div>
 
+<div id="boot">
+  <div id="term">
+    <div id="log"></div>
+    <div id="promptline"><span id="ps1">netwatch@mlt503:/db/451$</span> <span id="cmd"></span><span id="cur"> </span></div>
+  </div>
+  <input id="tin" type="text" autocomplete="off" autocapitalize="off" autocorrect="off"
+         spellcheck="false" aria-label="Terminal input">
+  <span class="tick tl"></span><span class="tick tr"></span>
+  <div class="bscan"></div>
+</div>
+
 <script>
 (function () {
 "use strict";
+
+/* ================================================================
+   BOOT DESKTOP
+   the barrier does not start until this hands over. that is deliberate:
+   an AudioContext needs a user gesture, and user activation does not
+   survive a navigation — so the way in has to live in this document.
+   ================================================================ */
+let onBoot   = null;   // called synchronously on the keypress -> audio
+let onReveal = null;   // called when the terminal is about to clear -> render
+
+(function terminal(){
+  const root     = document.getElementById("boot");
+  const term     = document.getElementById("term");
+  const logEl    = document.getElementById("log");
+  const promptEl = document.getElementById("promptline");
+  const cmdEl    = document.getElementById("cmd");
+  const input    = document.getElementById("tin");
+  if (!root) return;
+
+  const PASS = ["blackwall", "blackwall_451", "黑墙"];   // 黑墙 is on the index too
+  const esc  = t => String(t).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]);
+  const wide = t => { let n = 0;
+    for (const ch of String(t)) n += /[\u1100-\u115F\u2E80-\u9FFF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1;
+    return n; };
+  const pad  = (t, n) => String(t) + " ".repeat(Math.max(0, n - wide(t)));
+  const padL = (t, n) => " ".repeat(Math.max(0, n - wide(t))) + String(t);
+
+  /* the one thing we cannot read locally. fired now so it is usually
+     resolved by the time the trace block scrolls past. */
+  let originIP = null;
+  try {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 2500);
+    fetch("https://api.ipify.org?format=json", { signal: ac.signal, cache: "no-store" })
+      .then(r => r.json())
+      .then(j => { originIP = j.ip; paintIP(); })
+      .catch(() => { originIP = false; paintIP(); });
+  } catch (e) { originIP = false; }
+  function paintIP(){
+    const el = document.getElementById("ipv");
+    if (!el) return;
+    el.textContent = originIP ? originIP : "trace blocked at relay";
+    el.className = originIP ? "val" : "wr";
+  }
+
+  /* ---------------------------------------------------------------- probe */
+  function agent(){
+    const u = navigator.userAgent; let m;
+    if ((m = u.match(/Firefox\/([\d.]+)/)))          return ["Firefox", m[1], "Gecko"];
+    if ((m = u.match(/Edg\/([\d.]+)/)))              return ["Edge", m[1], "Blink"];
+    if ((m = u.match(/OPR\/([\d.]+)/)))              return ["Opera", m[1], "Blink"];
+    if ((m = u.match(/Chrome\/([\d.]+)/)))           return ["Chrome", m[1], "Blink"];
+    if ((m = u.match(/Version\/([\d.]+).*Safari/)))  return ["Safari", m[1], "WebKit"];
+    return ["unidentified", "?", "?"];
+  }
+  function host(){
+    const u = navigator.userAgent;
+    if (/Windows NT 10/.test(u)) return "Windows 10/11";
+    if (/Windows NT/.test(u))    return "Windows";
+    if (/Android/.test(u))       return "Android";
+    if (/iPhone|iPad|iPod/.test(u)) return "iOS";
+    if (/Mac OS X/.test(u))      return "macOS";
+    if (/CrOS/.test(u))          return "ChromeOS";
+    if (/Linux/.test(u))         return "Linux";
+    return "unidentified";
+  }
+  function accel(){
+    try {
+      const c = document.createElement("canvas");
+      const g = c.getContext("webgl2") || c.getContext("webgl");
+      if (!g) return "none — software path";
+      const e = g.getExtension("WEBGL_debug_renderer_info");
+      return (e && g.getParameter(e.UNMASKED_RENDERER_WEBGL)) || g.getParameter(g.RENDERER) || "masked";
+    } catch (e){ return "masked"; }
+  }
+  function tz(){
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"; }
+    catch (e){ return "unknown"; }
+  }
+  function utc(){
+    const o = -new Date().getTimezoneOffset(), s = o < 0 ? "-" : "+";
+    return "UTC" + s + String((Math.abs(o)/60)|0).padStart(2,"0") + ":" + String(Math.abs(o)%60).padStart(2,"0");
+  }
+  function stamp(){
+    const d = new Date(), p = n => String(n).padStart(2,"0");
+    return d.getFullYear() + "-" + p(d.getMonth()+1) + "-" + p(d.getDate()) + " " +
+           p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  const kv = (k, v, cls) =>
+    '    <i class="key">' + pad(k, 13) + '</i><i class="' + (cls || "val") + '">' + esc(v) + '</i>';
+
+  function traceBlock(){
+    const [br, ver, eng] = agent();
+    const mem = navigator.deviceMemory ? navigator.deviceMemory + " GB" : "undisclosed";
+    const cor = navigator.hardwareConcurrency || "undisclosed";
+    const con = (navigator.connection && navigator.connection.effectiveType) || "undisclosed";
+    return [
+      '',
+      '  <i class="hd">── CLIENT TRACE ────────────────────────────</i>',
+      '    <i class="key">' + pad("origin", 13) + '</i><i id="ipv" class="dim">resolving…</i>',
+      kv("agent",     br + " " + ver + "  /  " + eng),
+      kv("host os",   host()),
+      kv("accelerator", accel()),
+      kv("display",   screen.width + " × " + screen.height + " @ " + (window.devicePixelRatio || 1).toFixed(2)),
+      kv("viewport",  innerWidth + " × " + innerHeight),
+      kv("cores",     cor),
+      kv("memory",    mem),
+      kv("uplink",    con),
+      kv("locale",    (navigator.languages || [navigator.language]).slice(0,3).join(", ")),
+      kv("timezone",  tz() + "  " + utc()),
+      kv("localtime", stamp()),
+      kv("referrer",  document.referrer || "direct entry"),
+      kv("touch",     (navigator.maxTouchPoints || 0) + " points"),
+      '',
+      '  <i class="wr">trace logged.</i> <i class="dim">connection metadata retained 90 days per NetWatch policy.</i>',
+      ''
+    ];
+  }
+
+  /* ---------------------------------------------------------------- boot */
+  const t = (s, txt) => '<i class="dim">[' + padL(s, 11) + ']</i> ' + txt;
+  function bootLines(){
+    return [
+      '<i class="hd">MILITECH "HYDRA" CYBERDECK — MLT.503</i>   <i class="dim">firmware 2.1 :: 22.003</i>',
+      '<i class="dim">netwatch subnet 451 · operator terminal · session 0x' +
+        Math.floor(Math.random()*0xffffffff).toString(16).padStart(8,"0") + '</i>',
+      '',
+      t("0.000000", 'kern: cold start'),
+      t("0.004112", 'kern: loading <i class="dim">ice.ko</i>'),
+      t("0.114302", 'ice: 4096 nodes, 12 sectors, mtu 9000'),
+      t("0.166841", 'ice: cipher suite <i class="dim">kerenzikov-7</i>'),
+      t("0.229517", 'ice: subnet 451 handshake <i class="ok">ok</i>'),
+      t("0.301774", 'net: relay 451.112 <i class="ok">up</i>'),
+      t("0.312006", 'net: relay 451.113 <i class="ok">up</i>'),
+      t("0.384120", '<i class="cj">黑墙 :: 完整性</i> <i class="ok">99.4%</i>'),
+      t("0.441903", '<i class="cj">监视者 :: 待机中</i>'),
+      t("0.512884", 'blackwall.d: attached to lattice'),
+      t("0.667031", 'blackwall.d: holding'),
+      t("0.884210", 'daemon/rabid: contained'),
+      t("1.204778", 'daemon/unknown: <i class="wr">pressure sustained</i>'),
+      t("1.209004", 'audit: 0 anomalies since last cycle'),
+      t("1.377215", 'trace: profiling client…')
+    ].concat(traceBlock(), [
+      '  <i class="hd">DATAFORT INDEX</i>',
+      '    db_pcfc_451_112    <i class="dim">sealed</i>',
+      '    db_pcfc_451_113    <i class="dim">sealed</i>',
+      '    db_pcfc_451_114    <i class="dim">sealed</i>',
+      '    blackwall_451      <i class="ok">open</i>        <i class="cj">黑墙</i>',
+      '',
+      '  <i class="wr">警告 / ADVISORY</i>',
+      '  <i class="dim">subnet 451 terminates at the blackwall. observation only.</i>',
+      '',
+      '<i class="dim">shell ready. 4 dataforts mounted, 3 sealed.</i>'
+    ]);
+  }
+
+  function print(html){
+    const d = document.createElement("div");
+    d.innerHTML = html === "" ? "&nbsp;" : html;
+    logEl.appendChild(d);
+    term.scrollTop = term.scrollHeight;
+    return d;
+  }
+
+  let idle = false, done = false;
+  const SEQ = bootLines();
+  let i = 0;
+  const rolling = setInterval(() => {
+    print(SEQ[i++]);
+    paintIP();                                  // no-ops until the line exists
+    if (i < SEQ.length) return;
+    clearInterval(rolling);
+    idle = true;
+    promptEl.classList.add("on");
+    focus();
+  }, 34);
+
+  /* ---------------------------------------------------------------- input */
+  function focus(){
+    if (!idle || done) return;
+    try { input.focus({ preventScroll:true }); } catch (e){ input.focus(); }
+  }
+  root.addEventListener("mousedown", () => setTimeout(focus, 0));
+  addEventListener("keydown", focus);
+  input.addEventListener("input", () => { cmdEl.textContent = input.value; });
+
+  const REJECT = [
+    x => 'sh: ' + x + ': no such datafort',
+    x => '<i class="wr">mount refused</i> :: <i class="cj">拒绝访问</i>',
+    x => 'ice: ' + x + ' is sealed. passthrough denied.',
+    x => '<i class="cj">无效指令</i> <i class="dim">— expected a datafort name</i>'
+  ];
+  let tries = 0;
+
+  function submit(){
+    const raw = input.value.trim();
+    print('<i class="cj">netwatch@mlt503:/db/451$</i> ' + esc(raw));
+    input.value = ""; cmdEl.textContent = "";
+    if (PASS.indexOf(raw.toLowerCase()) >= 0){ open_(); return; }
+    if (raw === "") return;
+    print(REJECT[tries++ % REJECT.length](esc(raw.slice(0, 24))));
+    /* point back at the index, never at the answer */
+    if (tries === 3) print('<i class="dim">451 hosts four dataforts. three of them are sealed.</i>');
+    if (tries === 6) print('<i class="cj">提示 :: 只有一个是开放的。</i>');
+  }
+
+  /* ------------------------------------------------- the jack-in sequence */
+  function openLines(){
+    const out = [
+      '',
+      'mount /db/blackwall_451',
+      'ice: negotiating passthrough with subnet 451',
+      'ice: operator credentials <i class="ok">accepted</i>'
+    ];
+    const ICE = ["黑冰 / black ice","trace scrambler","daemon sink","echo baffle",
+                 "lattice mirror","null router","carrier mask","sector fence"];
+    for (let k = 1; k <= 16; k++){
+      const nm = ICE[(k-1) % ICE.length];
+      out.push('ice: layer ' + String(k).padStart(2,"0") + '/16  ' + pad(nm, 22) +
+               (k === 13 ? '<i class="wr">degraded</i>' : '<i class="ok">ok</i>'));
+    }
+    return out.concat([
+      'ice: passthrough granted <i class="wr">READ ONLY</i>',
+      '',
+      '<i class="cj">黑墙 :: 建立连接…</i>',
+      'blackwall: aligning lattice, 4096 conduits',
+      'blackwall: sector sweep 12/12',
+      'blackwall: <i class="wr">rogue pressure detected beyond barrier</i>',
+      'blackwall: observation window open',
+      '',
+      'audio /dev/dsp0: <i class="ok">online</i>',
+      'render: compiling shaders',
+      'render: lattice buffered',
+      'render: <i class="ok">handing over</i>',
+      ''
+    ]);
+  }
+
+  function open_(){
+    if (done) return;
+    done = true;
+    root.classList.add("busy");
+    input.blur();
+
+    /* synchronous, so this keypress still counts as the gesture that lets
+       the AudioContext start. the wall itself waits until the fade. */
+    if (onBoot) onBoot();
+
+    const OUT = openLines(), STEP = 78;
+    OUT.forEach((l, k) => setTimeout(() => print(l), k*STEP));
+    const end = OUT.length*STEP;
+    setTimeout(() => { if (onReveal) onReveal(); }, end + 120);
+    setTimeout(() => root.classList.add("gone"), end + 460);
+    setTimeout(() => root.remove(), end + 1050);
+  }
+
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter"){ e.preventDefault(); if (idle && !done) submit(); }
+  });
+})();
 
 const cvs = document.getElementById("gl");
 const gl = cvs.getContext("webgl2", { antialias:false, alpha:false, powerPreference:"high-performance", desynchronized:true });
@@ -39,6 +365,13 @@ if (!gl) return;
    glow around them comes from the light itself rather than a painted-on haze. */
 const HDR = !!gl.getExtension("EXT_color_buffer_float");
 const CALM = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1.0 : 0.0;
+
+/* the barrier is never the same barrier twice. where the colour sits, and how
+   much of the wall ICE is still holding, are drawn fresh on every load — the
+   exponent tilts it so that most sessions are mostly red and only some of
+   them are shot through with blue. */
+const SEED = [Math.random()*180.0, Math.random()*180.0];
+const COLD = Math.pow(Math.random(), 1.30);
 
 /* ================================================================
    SHADERS
@@ -61,6 +394,8 @@ uniform float uCalm;
 uniform float uBT;      // seconds since the current breach began
 uniform vec2  uBP;      // where on the barrier it is pressing
 uniform float uHdr;     // 1 = float target, 0 = 8-bit fallback
+uniform vec2  uSeed;    // per-load offset for the colour fields
+uniform float uCold;    // how much ICE is holding this session, 0..1
 
 #define PI 3.141592653589793
 
@@ -94,14 +429,12 @@ Col column(float i, float v){
   float w = 0.042 + 0.130*a*a*a;
 
   /* palette: arterial red dominant, hot magenta where the load is highest,
-     whole stretches of indigo where NetWatch ICE is still holding, and the
-     odd run of cold cyan. the noise is smooth in i, so colours arrive in
-     bands of neighbouring conduits rather than one filament at a time. */
-  /* the colour field is two-dimensional and it drifts, so hue varies up the
-     conduit as well as along the wall — patches rather than stripes */
-  float drift = n2(vec2(i*0.028, v*0.075) + vec2(uT*0.019, -uT*0.012));
-  float n = vnoise(i*0.062 + uT*0.011)*0.50
-          + vnoise(i*0.24  - uT*0.007)*0.22
+     indigo where NetWatch ICE is still holding, the odd run of cold cyan.
+     the field is two-dimensional and drifting, so hue varies up the conduit
+     as well as along the wall, and it arrives in patches rather than stripes. */
+  float drift = n2(vec2(i*0.028, v*0.075) + uSeed + vec2(uT*0.019, -uT*0.012));
+  float n = vnoise(i*0.062 + uSeed.x + uT*0.011)*0.50
+          + vnoise(i*0.24  + uSeed.y - uT*0.007)*0.22
           + drift*0.28;
   vec3 red = vec3(1.00, 0.045, 0.075);
   vec3 ros = vec3(1.00, 0.090, 0.210);
@@ -113,10 +446,14 @@ Col column(float i, float v){
   col = mix(col, ind, smoothstep(0.855, 0.945, n));
   col = mix(col, ice, smoothstep(0.965, 0.996, n));
 
-  /* and every so often a whole region goes to ICE — a big blue field
-     wandering across the barrier, not one cold conduit at a time. it has to
-     stay saturated: a pale blue this bright just tonemaps to white. */
-  float coldM = smoothstep(0.58, 0.88, n2(vec2(i*0.058, v*0.135) + vec2(uT*0.016, uT*0.010)));
+  /* and every so often a whole region goes to ICE — a blue field wandering
+     across the barrier, not one cold conduit at a time. it has to stay
+     saturated: a pale blue this bright just tonemaps to white.
+     where it sits and how much of it there is are drawn fresh each load —
+     on a quiet session there is almost none of it at all. */
+  float lo = mix(0.88, 0.34, uCold);
+  float coldM = smoothstep(lo, lo + 0.28,
+                  n2(vec2(i*0.058, v*0.135) + uSeed*1.7 + vec2(uT*0.016, uT*0.010)));
   col = mix(col, vec3(0.05, 0.26, 1.00), coldM*0.92);
 
   /* traffic along the filament — continuous, faintly segmented */
@@ -149,7 +486,7 @@ Col column(float i, float v){
   bri *= 1.0 + scan*0.40;
 
   /* wide dormant zones — the barrier is not lit evenly across its span */
-  bri *= smoothstep(0.08, 0.56, vnoise(i*0.0205 + uT*0.0055))*0.66 + 0.34;
+  bri *= smoothstep(0.08, 0.56, vnoise(i*0.0205 + uSeed.y*0.37 + uT*0.0055))*0.66 + 0.34;
 
   bri *= smoothstep(20.0, 1.5, v);
   bri *= 1.0 + uPulse*0.45;
@@ -540,7 +877,7 @@ function makeProgram(frag, names){
 }
 
 const P = {
-  scene:  makeProgram(FRAG_SCENE,  ["uRes","uT","uPulse","uCalm","uBT","uBP","uHdr"]),
+  scene:  makeProgram(FRAG_SCENE,  ["uRes","uT","uPulse","uCalm","uBT","uBP","uHdr","uSeed","uCold"]),
   bright: makeProgram(FRAG_BRIGHT, ["uTex","uTexel","uThresh","uHdr"]),
   blur:   makeProgram(FRAG_BLUR,   ["uTex","uTexel","uDir","uStride"]),
   comp:   makeProgram(FRAG_COMP,   ["uScene","uBloomTex","uRes","uT","uEnter","uBloomAmt","uHdr"])
@@ -585,7 +922,7 @@ function resize(){
 resize();
 addEventListener("resize", resize, { passive:true });
 
-let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = true;
+let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = false, started = false;
 let breachT = -1e4, breachX = 0.0, breachY = 7.0;
 function strike(a){ pulse = Math.min(1.3, pulse + a); }
 
@@ -629,6 +966,8 @@ function frame(now){
   gl.uniform1f(P.scene.u.uBT, clockT - breachT);
   gl.uniform2f(P.scene.u.uBP, breachX, breachY);
   gl.uniform1f(P.scene.u.uHdr, HDR ? 1 : 0);
+  gl.uniform2f(P.scene.u.uSeed, SEED[0], SEED[1]);
+  gl.uniform1f(P.scene.u.uCold, COLD);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   /* --- bright pass --- */
@@ -677,9 +1016,22 @@ function frame(now){
 
   requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+
+/* the terminal calls this when you jack in. the reveal starts from black
+   and the audio comes up on the same gesture. */
+onBoot = function(){ bootAudio(); };
+
+/* held back until the terminal is nearly gone, so the barrier fades up from
+   black instead of being half lit by the time you see it */
+onReveal = function(){
+  if (started) return;
+  started = true; running = true;
+  enter = 0; clockT = 0; t0 = performance.now();
+  requestAnimationFrame(frame);
+};
 
 document.addEventListener("visibilitychange", () => {
+  if (!started) return;
   running = !document.hidden;
   if (running){ t0 = performance.now() - clockT*1000; requestAnimationFrame(frame); if (AC && audioReady) AC.resume(); }
   else if (AC) AC.suspend();
@@ -881,10 +1233,6 @@ function bootAudio(){
     if (AC.state !== "running") AC.resume();
   } catch (e) { /* silent */ }
 }
-bootAudio();
-["pointerdown","keydown","touchstart","wheel"].forEach(ev =>
-  addEventListener(ev, bootAudio, { once:true, passive:true }));
-
 })();
 </script>
 </body>
