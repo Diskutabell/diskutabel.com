@@ -97,7 +97,12 @@ Col column(float i, float v){
      whole stretches of indigo where NetWatch ICE is still holding, and the
      odd run of cold cyan. the noise is smooth in i, so colours arrive in
      bands of neighbouring conduits rather than one filament at a time. */
-  float n = vnoise(i*0.062 + uT*0.011)*0.66 + vnoise(i*0.24 - uT*0.007)*0.34;
+  /* the colour field is two-dimensional and it drifts, so hue varies up the
+     conduit as well as along the wall — patches rather than stripes */
+  float drift = n2(vec2(i*0.028, v*0.075) + vec2(uT*0.019, -uT*0.012));
+  float n = vnoise(i*0.062 + uT*0.011)*0.50
+          + vnoise(i*0.24  - uT*0.007)*0.22
+          + drift*0.28;
   vec3 red = vec3(1.00, 0.045, 0.075);
   vec3 ros = vec3(1.00, 0.090, 0.210);
   vec3 mag = vec3(1.00, 0.070, 0.480);
@@ -107,6 +112,11 @@ Col column(float i, float v){
   col = mix(col, mag, smoothstep(0.64, 0.83, n));
   col = mix(col, ind, smoothstep(0.855, 0.945, n));
   col = mix(col, ice, smoothstep(0.965, 0.996, n));
+
+  /* and every so often a whole region goes to ICE — a big soft blue field
+     wandering across the barrier, not one cold conduit at a time */
+  float cold = n2(vec2(i*0.0155, v*0.042) + vec2(uT*0.013, uT*0.008));
+  col = mix(col, vec3(0.42, 0.72, 1.00), smoothstep(0.60, 0.90, cold)*0.85);
 
   /* traffic along the filament — continuous, faintly segmented */
   float dir = b > 0.5 ? 1.0 : -1.0;
@@ -195,7 +205,7 @@ float breachH(vec2 p){
 }
 
 /* ---------------- barrier surface ---------------- */
-vec3 wall(vec2 p, float foot, float ca, float bh){
+vec3 wall(vec2 p, float foot, float ca, float bh, float ex){
   const float P = 0.30;
   float fu = p.x / P;
   float aa = max(foot / P, 0.0006);
@@ -218,6 +228,15 @@ vec3 wall(vec2 p, float foot, float ca, float bh){
     cov.b = clamp((hw - abs(dd + cab))/aa + 0.5, 0.0, 1.0);
 
     sharp += c.c * cov * c.b;
+
+    /* the barrier has thickness. the same conduit shows again a short way
+       behind itself, thrown sideways by parallax and going cold and soft
+       with depth — that repeat is what makes it read as glass instead of
+       as a printed line. two echoes is enough; three starts to fog. */
+    vec3 deep = mix(c.c, vec3(0.46, 0.70, 1.00), 0.22);
+    float g1 = clamp((hw*0.92 - abs(dd - ex       ))/(aa*1.7) + 0.5, 0.0, 1.0);
+    float g2 = clamp((hw*0.80 - abs(dd - ex*2.05))/(aa*2.6) + 0.5, 0.0, 1.0);
+    sharp += deep * c.b * (g1*0.30 + g2*0.12);
 
     /* incandescent core — this is what makes an emitter read as real:
        the centre clips to white, the colour lives in the falloff */
@@ -257,6 +276,11 @@ vec3 wall(vec2 p, float foot, float ca, float bh){
 
 /* re-aim the sample along the ray so the displaced surface still lines up */
 vec3 wallSample(vec3 p, vec3 dir, float foot, float ca){
+  /* how far one sheet-depth further back is thrown sideways at this angle.
+     it grows toward grazing rays, which is what gives the depth its splay. */
+  const float DZ = 0.34, P = 0.30;
+  float ex = clamp(dir.x/dir.z, -4.0, 4.0) * (DZ/P);
+
   vec2 par = dir.xy / dir.z;
   par *= min(1.0, 2.2/max(length(par), 1e-3));
 
@@ -270,7 +294,7 @@ vec3 wallSample(vec3 p, vec3 dir, float foot, float ca){
     bh = breachH(mix(wp, qp, qm));
     wp = p.xy + par*bh;
   }
-  return wall(wp, foot, ca, bh);
+  return wall(wp, foot, ca, bh, ex);
 }
 
 /* ---------------- everything the ray meets, front to back ---------------- */
