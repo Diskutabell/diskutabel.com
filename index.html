@@ -106,17 +106,18 @@ Col column(float i, float v){
   vec3 red = vec3(1.00, 0.045, 0.075);
   vec3 ros = vec3(1.00, 0.090, 0.210);
   vec3 mag = vec3(1.00, 0.070, 0.480);
-  vec3 ind = vec3(0.30, 0.19, 1.00);
-  vec3 ice = vec3(0.25, 0.68, 1.00);
+  vec3 ind = vec3(0.16, 0.13, 1.00);
+  vec3 ice = vec3(0.08, 0.46, 1.00);
   vec3 col = mix(red, ros, smoothstep(0.26, 0.58, n));
   col = mix(col, mag, smoothstep(0.64, 0.83, n));
   col = mix(col, ind, smoothstep(0.855, 0.945, n));
   col = mix(col, ice, smoothstep(0.965, 0.996, n));
 
-  /* and every so often a whole region goes to ICE — a big soft blue field
-     wandering across the barrier, not one cold conduit at a time */
-  float cold = n2(vec2(i*0.0155, v*0.042) + vec2(uT*0.013, uT*0.008));
-  col = mix(col, vec3(0.42, 0.72, 1.00), smoothstep(0.60, 0.90, cold)*0.85);
+  /* and every so often a whole region goes to ICE — a big blue field
+     wandering across the barrier, not one cold conduit at a time. it has to
+     stay saturated: a pale blue this bright just tonemaps to white. */
+  float coldM = smoothstep(0.58, 0.88, n2(vec2(i*0.0155, v*0.042) + vec2(uT*0.013, uT*0.008)));
+  col = mix(col, vec3(0.05, 0.26, 1.00), coldM*0.92);
 
   /* traffic along the filament — continuous, faintly segmented */
   float dir = b > 0.5 ? 1.0 : -1.0;
@@ -152,6 +153,7 @@ Col column(float i, float v){
 
   bri *= smoothstep(20.0, 1.5, v);
   bri *= 1.0 + uPulse*0.45;
+  bri *= 1.0 - 0.30*coldM;
 
   Col r; r.c = col; r.b = bri; r.w = w; return r;
 }
@@ -241,7 +243,10 @@ vec3 wall(vec2 p, float foot, float ca, float bh, float ex){
     /* incandescent core — this is what makes an emitter read as real:
        the centre clips to white, the colour lives in the falloff */
     float inner = clamp((hw*0.42 - abs(dd))/aa + 0.5, 0.0, 1.0);
-    sharp += mix(c.c, vec3(1.0, 0.96, 0.94), 0.78) * inner * c.b * 0.32;
+    /* only the warm conduits bleach at the core. blowing a blue one to white
+       is what turned the ICE regions into featureless glare. */
+    float warm = clamp(c.c.r - c.c.b*0.5, 0.0, 1.0);
+    sharp += mix(c.c, vec3(1.0, 0.96, 0.94), 0.28 + 0.50*warm) * inner * c.b * 0.32;
 
     halo += c.c * c.b * (exp(-dd*dd*1.30)*0.022 + 0.0022/(1.0 + dd*dd*1.40));
     avg  += c.c * c.b * c.w;
@@ -498,7 +503,7 @@ void main(){
 
   vec3 b = dec(texture(uBloomTex, q).rgb, uHdr);
 
-  vec3 col = c + b * uBloomAmt * vec3(1.00, 0.88, 0.94);
+  vec3 col = c + b * uBloomAmt * vec3(1.00, 0.95, 0.99);
 
   col = aces(col * 0.92);
   col = pow(col, vec3(1.0/2.2));
@@ -593,9 +598,9 @@ function triggerBreach(){
   strike(0.45);
 }
 function scheduleBreach(){
-  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 95000 + Math.random()*125000);
+  setTimeout(() => { triggerBreach(); scheduleBreach(); }, 42000 + Math.random()*58000);
 }
-setTimeout(() => { triggerBreach(); scheduleBreach(); }, 34000 + Math.random()*34000);
+setTimeout(() => { triggerBreach(); scheduleBreach(); }, 18000 + Math.random()*20000);
 
 /* a soft halo, not a flare: enough spread to make the conduits read as
    emitters, short enough that nothing smears across the frame */
