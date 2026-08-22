@@ -7,6 +7,7 @@
 <meta name="description" content="An ambient rendering of the Blackwall.">
 <meta name="theme-color" content="#000000">
 <style>
+  :root{--nw:url("data:image/png;base64,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")}
   *{box-sizing:border-box}
   html,body{margin:0;padding:0;height:100%;width:100%;background:#000;overflow:hidden}
   canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
@@ -21,12 +22,36 @@
     background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.6) 3px,rgba(0,0,0,0) 4px)}
   @media (prefers-reduced-motion:reduce){.veil{animation:none}}
 
+  /* NetWatch mark on the feed — they built the wall, it is their camera.
+     the wordmark is an alpha mask so it can be tinted and dimmed like the
+     rest of the HUD instead of sitting on the frame as a foreign image. */
+  .mark{position:fixed;right:28px;bottom:24px;z-index:2;pointer-events:none;
+    display:flex;flex-direction:column;align-items:flex-end;gap:8px;
+    opacity:0;animation:markin 7s ease-out 3s forwards}
+  @keyframes markin{to{opacity:1}}
+  .mark i{display:block;width:132px;height:13px;background:#ff2a3c;opacity:.52;
+    filter:drop-shadow(0 0 7px rgba(255,42,60,.45));
+    -webkit-mask:var(--nw) no-repeat right center/contain;
+            mask:var(--nw) no-repeat right center/contain}
+  .mark span{font:9px/1 ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
+    letter-spacing:.24em;text-transform:uppercase;color:rgba(255,42,60,.32);
+    text-shadow:0 0 6px rgba(255,42,60,.25)}
+  @media (max-width:600px){ .mark{right:16px;bottom:16px} .mark i{width:104px;height:10px} }
+  @media (prefers-reduced-motion:reduce){ .mark{animation-duration:.6s;animation-delay:0s} }
+
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <div class="veil"></div>
 <div class="crt"></div>
+
+<!-- NETWATCH wordmark by Valency (@valencygraphics), released for
+     non-commercial fan use. Cyberpunk 2077 is a registered trademark of
+     CD PROJEKT S.A. (c) 2020 CD PROJEKT S.A. All rights reserved. -->
+<div class="mark" aria-hidden="true">
+  <i></i><span>subnet 451 &middot; blackwall &middot; observation feed</span>
+</div>
 
 <script>
 (function () {
@@ -46,7 +71,7 @@ const CALM = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1.0
    exponent tilts it so that most sessions are mostly red and only some of
    them are shot through with blue. */
 const SEED = [Math.random()*180.0, Math.random()*180.0];
-const COLD = Math.pow(Math.random(), 1.30);
+const COLD = Math.pow(Math.random(), 2.20);
 
 /* ================================================================
    SHADERS
@@ -112,25 +137,27 @@ Col column(float i, float v){
   float n = vnoise(i*0.062 + uSeed.x + uT*0.011)*0.50
           + vnoise(i*0.24  + uSeed.y - uT*0.007)*0.22
           + drift*0.28;
+  vec3 drk = vec3(0.30, 0.011, 0.018);   /* near-black arterial */
   vec3 red = vec3(1.00, 0.045, 0.075);
   vec3 ros = vec3(1.00, 0.090, 0.210);
   vec3 mag = vec3(1.00, 0.070, 0.480);
   vec3 ind = vec3(0.16, 0.13, 1.00);
   vec3 ice = vec3(0.08, 0.46, 1.00);
-  vec3 col = mix(red, ros, smoothstep(0.26, 0.58, n));
-  col = mix(col, mag, smoothstep(0.64, 0.83, n));
-  col = mix(col, ind, smoothstep(0.855, 0.945, n));
-  col = mix(col, ice, smoothstep(0.965, 0.996, n));
+  vec3 col = mix(drk, red, smoothstep(0.10, 0.42, n));
+  col = mix(col, ros, smoothstep(0.46, 0.66, n));
+  col = mix(col, mag, smoothstep(0.70, 0.86, n));
+  col = mix(col, ind, smoothstep(0.880, 0.952, n));
+  col = mix(col, ice, smoothstep(0.968, 0.997, n));
 
   /* and every so often a whole region goes to ICE — a blue field wandering
      across the barrier, not one cold conduit at a time. it has to stay
      saturated: a pale blue this bright just tonemaps to white.
      where it sits and how much of it there is are drawn fresh each load —
      on a quiet session there is almost none of it at all. */
-  float lo = mix(0.88, 0.34, uCold);
-  float coldM = smoothstep(lo, lo + 0.28,
-                  n2(vec2(i*0.058, v*0.135) + uSeed*1.7 + vec2(uT*0.016, uT*0.010)));
-  col = mix(col, vec3(0.05, 0.26, 1.00), coldM*0.92);
+  float lo = mix(0.94, 0.58, uCold);
+  float coldM = smoothstep(lo - 0.12, lo + 0.30,
+                  n2(vec2(i*0.088, v*0.190) + uSeed*1.7 + vec2(uT*0.016, uT*0.010)));
+  col = mix(col, vec3(0.05, 0.26, 1.00), coldM*0.74);
 
   /* traffic along the filament — continuous, faintly segmented */
   float dir = b > 0.5 ? 1.0 : -1.0;
@@ -332,7 +359,7 @@ vec3 barrier(vec3 o, vec3 d, float travel, float px, float radial, out float pat
     /* defocus grows toward the vanishing edge, like a long lens wide open */
     float f1 = (travel + t1)*px/max(abs(d.z), 0.02) * (1.0 + 1.30*radial*radial);
     acc += wallSample(p1, d, f1, 0.45 + 1.15*radial)
-           * exp(-(travel + t1)*0.0135);
+           * exp(-(travel + t1)*0.0082);
     path = travel + t1;
   }
   return acc;
@@ -413,7 +440,7 @@ vec3 plain(vec3 pos, vec3 rd, float travel, float px, float radial, out float pa
   lit += c.c * c.b * live * dens * 0.055 * exp(-max(sd, 0.0)*11.0);
 
   path = travel * 1.7;
-  return col + lit * exp(-travel*0.0135);
+  return col + lit * exp(-travel*0.0082);
 }
 
 void main(){
@@ -550,7 +577,7 @@ void main(){
 
   col *= 0.975 + 0.025*sin(frag.y*PI + uT*1.7);
   col += (hash21(frag + fract(uT)*vec2(97.1, 31.7)) - 0.5) * 0.028;
-  col *= 0.52 + 0.48*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.22);
+  col *= 0.64 + 0.36*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.22);
 
   col *= uEnter;
   O = vec4(max(col, 0.0), 1.0);
@@ -646,16 +673,17 @@ function triggerBreach(){
   bsY    = size / rt;
   bsStr  = (0.45 + Math.random()*0.70) / Math.sqrt(size);
   bsSeed = Math.random() * 97.0;
-  if (audioReady && AC && AC.state === "running") pressure();
+  /* only the big ones get a swell — they arrive too often now to all be heard */
+  if (size > 1.75 && audioReady && AC && AC.state === "running") pressure();
   strike(0.45);
 }
 /* poisson arrivals rather than a window: there is no interval to lock onto.
    two can land close together, then nothing for minutes. */
-function nextGap(){ return 9000 - Math.log(1.0 - Math.random())*52000; }
+function nextGap(){ return 3500 - Math.log(1.0 - Math.random())*17000; }
 function scheduleBreach(){
   setTimeout(() => { triggerBreach(); scheduleBreach(); }, nextGap());
 }
-setTimeout(() => { triggerBreach(); scheduleBreach(); }, 12000 + Math.random()*14000);
+setTimeout(() => { triggerBreach(); scheduleBreach(); }, 4000 + Math.random()*7000);
 
 /* a soft halo, not a flare: enough spread to make the conduits read as
    emitters, short enough that nothing smears across the frame */
@@ -919,10 +947,10 @@ function scheduleEvents(){
   setTimeout(() => {
     if (audioReady && AC.state === "running"){
       const r = Math.random();
-      if (r < 0.86) knock(); else clickTrain();
+      if (r < 0.965) knock(); else clickTrain();
     }
     scheduleEvents();
-  }, 6000 + Math.random()*16000);
+  }, 9000 + Math.random()*20000);
 }
 
 function bootAudio(){
