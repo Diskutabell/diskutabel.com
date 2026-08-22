@@ -68,6 +68,7 @@ uniform float uPulse;
 uniform float uCalm;
 uniform float uBT;      // seconds since the current breach began
 uniform vec2  uBP;      // where on the barrier it is pressing
+uniform vec4  uBS;      // xy = extent, z = strength, w = seed — per breach
 uniform float uHdr;     // 1 = float target, 0 = 8-bit fallback
 uniform vec2  uSeed;    // per-load offset for the colour fields
 uniform float uCold;    // how much ICE is holding this session, 0..1
@@ -186,8 +187,11 @@ float breachEnv(){
 float breachH(vec2 p){
   float env = breachEnv();
   if (env <= 0.0005) return 0.0;
-  float sd = uBP.x*3.1 + uBP.y*7.7;
-  vec2 q = (p - uBP) * vec2(1.0, 1.10);
+  /* work in the breach's own frame. every constant below is then in units
+     of its extent, so one set of numbers describes a small tight one and a
+     wide flat one that spreads half the span. */
+  float sd = uBS.w;
+  vec2 q = (p - uBP) / max(uBS.xy, vec2(0.15));
 
   /* domain warp: whatever is behind this has no shape worth naming */
   vec2 w1 = vec2(fbm2(q*0.23 + sd), fbm2(q*0.23 + sd + 47.9)) - 0.5;
@@ -215,7 +219,7 @@ float breachH(vec2 p){
 
   /* frayed edge — it tears through rather than bulging out */
   float mask = smoothstep(0.16, 0.68, grain*0.85 + 0.42);
-  return (h*mask + ring + ripple) * env * 1.75;
+  return (h*mask + ring + ripple) * env * 1.30 * uBS.z;
 }
 
 /* ---------------- barrier surface ---------------- */
@@ -272,7 +276,7 @@ vec3 wall(vec2 p, float foot, float ca, float bh, float ex){
 
   /* the conduits root into the plain rather than meeting it in a line:
      a short, uneven flare at the base and nothing more */
-  col += vec3(1.00, 0.16, 0.24) * exp(-p.y*p.y*3.2) * 0.30
+  col += vec3(1.00, 0.16, 0.24) * exp(-p.y*p.y*0.85) * 0.26
          * (0.45 + 0.55*vnoise(p.x*0.42 + uT*0.045));
 
   /* white specks hanging in the field, like dust in a projector beam */
@@ -282,12 +286,12 @@ vec3 wall(vec2 p, float foot, float ca, float bh, float ex){
   float sd2 = length(sf) / max(0.020, foot*0.5);
   col += vec3(0.86, 0.82, 0.92) * step(0.988, sh) * exp(-sd2*sd2*1.9)
          * (0.30 + 0.70*hash21(sc+71.0)) * 0.95 * smoothstep(1.5, 8.0, p.y) * (1.0 - m)
-         * (1.0 + 3.2*clamp(bh*0.5, 0.0, 1.0));
+         * (1.0 + 2.0*clamp(bh*0.5, 0.0, 1.0));
 
   /* filaments hauled forward burn hotter, and the crest goes cold-white */
-  float g = clamp(bh*0.48, 0.0, 1.0);
-  col *= 1.0 + g*1.25;
-  col += mix(vec3(1.0, 0.18, 0.30), vec3(0.92, 0.42, 0.66), smoothstep(0.60, 1.0, g)) * g*g * 0.48;
+  float g = clamp(bh*0.30, 0.0, 1.0);
+  col *= 1.0 + g*0.85;
+  col += mix(vec3(1.0, 0.18, 0.30), vec3(0.92, 0.42, 0.66), smoothstep(0.60, 1.0, g)) * g*g * 0.30;
   return col;
 }
 
@@ -347,16 +351,37 @@ vec3 plain(vec3 pos, vec3 rd, float travel, float px, float radial, out float pa
   /* --- the polished sheen: reflect the ray and read the barrier back --- */
   float wob = (vnoise(z*0.34 + uT*0.075) - 0.5) * 0.90
             + (vnoise(z*1.15 - uT*0.130) - 0.5) * 0.28;
-  vec3 mo = vec3(pos.x + wob*(0.22 + z*0.028), 0.0, pos.z);
+  /* the ripple has to die out at the seam. anywhere else it can shove the
+     reflection sideways; at z = 0 the reflected point IS the point being
+     reflected, so any offset there tears the two apart. */
+  vec3 mo = vec3(pos.x + wob*z*0.055, 0.0, pos.z);
   vec3 mr = normalize(vec3(rd.x, -rd.y, rd.z));
-  float rough = 0.7 + 3.6*smoothstep(0.0, 24.0, z);
+  float rough = 1.0 + 3.3*smoothstep(0.0, 24.0, z);
   float rp;
   vec3 refl = barrier(mo, mr, travel, px*rough, radial, rp);
 
+  /* schlick. the exponent matters more than it looks: at grazing incidence
+     this has to reach 1, because that is the junction — the floor there is
+     reflecting the foot of the barrier at full strength, so the wall runs
+     continuously into its own reflection and there is no line to see. it
+     still falls to almost nothing at steeper angles, which keeps the near
+     floor dark and lets the point field carry it. */
   float cosI = clamp(abs(rd.y), 0.0, 1.0);
-  float F = 0.05 + 0.42*pow(1.0 - cosI, 3.2);
+  float F = 0.04 + 0.96*pow(1.0 - cosI, 5.0);
 
+  /* at the seam the reflected ray lands on the very point the direct ray
+     hits, so the only thing that can put a line there is the two sides
+     disagreeing about brightness. incidence never actually reaches grazing
+     here — the camera fixes it near cosI 0.2, where schlick gives ~0.35, a
+     2.8x step. so drive the sheen to a true mirror as z -> 0 and let it
+     relax back to fresnel a couple of units out. */
+  F = mix(1.0, F, smoothstep(0.0, 2.6, z));
+
+  /* NOT re-fogged: barrier() already applied extinction over the reflected
+     ray's own path. attenuating it a second time below only darkens the
+     floor side of the seam, which is half of why there was a line there. */
   vec3 col = refl * F;
+  vec3 lit = vec3(0.0);
 
   /* --- the loose data lying on it ---
      one row of points per conduit, running away from the barrier. this is
@@ -383,12 +408,12 @@ vec3 plain(vec3 pos, vec3 rd, float travel, float px, float radial, out float pa
   live *= 0.55 + 0.45*sin(uT*(0.5 + 2.2*h3) + h1*6.28);
   float dens = exp(-z*0.052) * (0.50 + 0.50*vnoise(pos.x*0.09 + z*0.05 + uT*0.02));
 
-  col += c.c * c.b * m * live * dens * 1.45;
+  lit += c.c * c.b * m * live * dens * 1.45;
   /* each point sits in its own small pool of light */
-  col += c.c * c.b * live * dens * 0.055 * exp(-max(sd, 0.0)*11.0);
+  lit += c.c * c.b * live * dens * 0.055 * exp(-max(sd, 0.0)*11.0);
 
   path = travel * 1.7;
-  return col * exp(-travel*0.0135);
+  return col + lit * exp(-travel*0.0135);
 }
 
 void main(){
@@ -552,7 +577,7 @@ function makeProgram(frag, names){
 }
 
 const P = {
-  scene:  makeProgram(FRAG_SCENE,  ["uRes","uT","uPulse","uCalm","uBT","uBP","uHdr","uSeed","uCold"]),
+  scene:  makeProgram(FRAG_SCENE,  ["uRes","uT","uPulse","uCalm","uBT","uBP","uBS","uHdr","uSeed","uCold"]),
   bright: makeProgram(FRAG_BRIGHT, ["uTex","uTexel","uThresh","uHdr"]),
   blur:   makeProgram(FRAG_BLUR,   ["uTex","uTexel","uDir","uStride"]),
   comp:   makeProgram(FRAG_COMP,   ["uScene","uBloomTex","uRes","uT","uEnter","uBloomAmt","uHdr"])
@@ -599,6 +624,7 @@ addEventListener("resize", resize, { passive:true });
 
 let pulse = 0, enter = 0, clockT = 0, t0 = performance.now(), running = true;
 let breachT = -1e4, breachX = 0.0, breachY = 7.0;
+let bsX = 1.0, bsY = 1.1, bsStr = 1.0, bsSeed = 0.0;
 function strike(a){ pulse = Math.min(1.3, pulse + a); }
 
 /* no rhythm, no favoured spot — you should never be able to guess either */
@@ -609,6 +635,17 @@ function triggerBreach(){
      from should be predictable. */
   breachX = -9.0 + Math.random()*44.0;
   breachY =  2.0 + Math.random()*10.0;
+
+  /* every one of them is a different thing leaning on the wall. size is
+     skewed small so the big ones stay an event, and the aspect is biased
+     wide — most of them spread along the span rather than climbing it. */
+  const size   = 0.55 + Math.pow(Math.random(), 1.75) * 2.70;
+  const aspect = Math.pow(2.0, -0.55 + Math.random() * 2.05);
+  const rt     = Math.sqrt(aspect);
+  bsX    = size * rt;
+  bsY    = size / rt;
+  bsStr  = (0.45 + Math.random()*0.70) / Math.sqrt(size);
+  bsSeed = Math.random() * 97.0;
   if (audioReady && AC && AC.state === "running") pressure();
   strike(0.45);
 }
@@ -640,6 +677,7 @@ function frame(now){
   gl.uniform1f(P.scene.u.uCalm, CALM);
   gl.uniform1f(P.scene.u.uBT, clockT - breachT);
   gl.uniform2f(P.scene.u.uBP, breachX, breachY);
+  gl.uniform4f(P.scene.u.uBS, bsX, bsY, bsStr, bsSeed);
   gl.uniform1f(P.scene.u.uHdr, HDR ? 1 : 0);
   gl.uniform2f(P.scene.u.uSeed, SEED[0], SEED[1]);
   gl.uniform1f(P.scene.u.uCold, COLD);
