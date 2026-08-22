@@ -137,13 +137,13 @@ Col column(float i, float v){
   float n = vnoise(i*0.062 + uSeed.x + uT*0.011)*0.50
           + vnoise(i*0.24  + uSeed.y - uT*0.007)*0.22
           + drift*0.28;
-  vec3 drk = vec3(0.30, 0.011, 0.018);   /* near-black arterial */
+  vec3 drk = vec3(0.46, 0.014, 0.024);   /* deep arterial, occasional */
   vec3 red = vec3(1.00, 0.045, 0.075);
   vec3 ros = vec3(1.00, 0.090, 0.210);
   vec3 mag = vec3(1.00, 0.070, 0.480);
   vec3 ind = vec3(0.16, 0.13, 1.00);
   vec3 ice = vec3(0.08, 0.46, 1.00);
-  vec3 col = mix(drk, red, smoothstep(0.10, 0.42, n));
+  vec3 col = mix(drk, red, smoothstep(0.03, 0.30, n));
   col = mix(col, ros, smoothstep(0.46, 0.66, n));
   col = mix(col, mag, smoothstep(0.70, 0.86, n));
   col = mix(col, ind, smoothstep(0.880, 0.952, n));
@@ -297,7 +297,7 @@ vec3 wall(vec2 p, float foot, float ca, float bh, float ex){
   avg /= 9.0;
 
   float m = smoothstep(0.10, 1.05, aa);
-  vec3 col = mix(sharp, avg*1.05, m) + halo;
+  vec3 col = mix(sharp, avg*2.10, m) + halo;
 
   col += vec3(0.18, 0.010, 0.034) * 0.018 * smoothstep(17.0, 0.4, p.y);
 
